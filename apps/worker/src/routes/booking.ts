@@ -20,6 +20,7 @@ import {
   saveIdempotencyResponse,
 } from '../services/booking-idempotency.js';
 import { sendBookingNotification } from '../services/booking-notifier.js';
+import { attachTagAndFireSideEffects } from '../services/friend-tag-attach.js';
 import {
   DEFAULT_ACCOUNT_SETTINGS,
   IDEMPOTENCY_TTL_MINUTES,
@@ -313,6 +314,7 @@ booking.post('/api/liff/booking/requests', async (c) => {
   const menuRow = await c.env.DB
     .prepare(
       `SELECT m.id, m.duration_minutes, m.buffer_after_minutes, m.base_price,
+              m.auto_tag_id,
               COALESCE(sm.override_duration_minutes, m.duration_minutes) AS dur,
               COALESCE(sm.override_price, m.base_price) AS price,
               sm.is_offered
@@ -322,7 +324,7 @@ booking.post('/api/liff/booking/requests', async (c) => {
           AND m.deleted_at IS NULL AND m.is_active = 1`,
     )
     .bind(body.menu_id, body.staff_id, accountId)
-    .first<{ duration_minutes: number; buffer_after_minutes: number; dur: number; price: number; is_offered: number | null }>();
+    .first<{ duration_minutes: number; buffer_after_minutes: number; auto_tag_id: string | null; dur: number; price: number; is_offered: number | null }>();
   if (!menuRow || menuRow.is_offered !== 1) {
     return c.json({ error: 'menu_not_offered' }, 422);
   }
@@ -433,6 +435,19 @@ booking.post('/api/liff/booking/requests', async (c) => {
     ),
   );
 
+  // notifyForBooking と同じく fire-and-forget。タグ付与失敗は予約成功扱い。
+  // attachTagAndFireSideEffects は POST /api/friends/:id/tags と同じ side effects
+  // (tag_added シナリオ enrollment + tag_change イベント) を発火する。
+  // INSERT OR IGNORE で重複を吸収し、新規付与のときだけ side effects を打つ。
+  if (menuRow.auto_tag_id) {
+    const tagId = menuRow.auto_tag_id;
+    c.executionCtx.waitUntil(
+      attachTagAndFireSideEffects(c.env.DB, friendId, tagId)
+        .then(() => undefined)
+        .catch((err) => console.error('booking auto-tag failed:', err)),
+    );
+  }
+
   const responseBody = { booking_id: bookingId, status: 'requested' };
   await saveIdempotencyResponse(c.env.DB, {
     key: idemKey,
@@ -505,7 +520,7 @@ booking.get('/api/booking/admin/menus', async (c) => {
     .prepare(
       `SELECT id, name, category_label, description,
               duration_minutes, buffer_after_minutes,
-              base_price, sort_order, is_active
+              base_price, sort_order, is_active, auto_tag_id
          FROM menus
         WHERE line_account_id = ? AND deleted_at IS NULL
         ORDER BY sort_order ASC, id ASC`,
@@ -526,14 +541,23 @@ booking.post('/api/booking/admin/menus', async (c) => {
     buffer_after_minutes?: number;
     base_price: number;
     sort_order?: number;
+    auto_tag_id?: string | null;
   }>();
+  const autoTagId = (b.auto_tag_id ?? '').trim() === '' ? null : (b.auto_tag_id as string);
+  if (autoTagId) {
+    const tagExists = await c.env.DB
+      .prepare(`SELECT 1 FROM tags WHERE id = ?`)
+      .bind(autoTagId)
+      .first<{ 1: number }>();
+    if (!tagExists) return c.json({ error: 'tag_not_found' }, 400);
+  }
   const id = crypto.randomUUID();
   await c.env.DB
     .prepare(
       `INSERT INTO menus
         (id, line_account_id, name, category_label, description,
-         duration_minutes, buffer_after_minutes, base_price, sort_order)
-       VALUES (?,?,?,?,?,?,?,?,?)`,
+         duration_minutes, buffer_after_minutes, base_price, sort_order, auto_tag_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
     )
     .bind(
       id,
@@ -545,6 +569,7 @@ booking.post('/api/booking/admin/menus', async (c) => {
       b.buffer_after_minutes ?? 0,
       b.base_price,
       b.sort_order ?? 0,
+      autoTagId,
     )
     .run();
   return c.json({ id }, 201);
@@ -563,29 +588,70 @@ booking.put('/api/booking/admin/menus/:id', async (c) => {
     base_price: number;
     sort_order?: number;
     is_active?: boolean;
+    auto_tag_id?: string | null;
   }>();
-  await c.env.DB
-    .prepare(
-      `UPDATE menus
-          SET name = ?, category_label = ?, description = ?,
-              duration_minutes = ?, buffer_after_minutes = ?,
-              base_price = ?, sort_order = ?, is_active = ?,
-              updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')
-        WHERE id = ? AND line_account_id = ?`,
-    )
-    .bind(
-      b.name,
-      b.category_label ?? null,
-      b.description ?? null,
-      b.duration_minutes,
-      b.buffer_after_minutes ?? 0,
-      b.base_price,
-      b.sort_order ?? 0,
-      b.is_active === false ? 0 : 1,
-      id,
-      accountId,
-    )
-    .run();
+  // PUT は古いクライアントが auto_tag_id フィールドを送らない場合がある。`undefined` を
+  // null として書き込むと既存設定を消してしまうため、key 存在チェックで「明示的に送られた
+  // ときだけ」更新する。
+  const hasAutoTagId = Object.prototype.hasOwnProperty.call(b, 'auto_tag_id');
+  const autoTagId = hasAutoTagId
+    ? ((b.auto_tag_id ?? '').trim() === '' ? null : (b.auto_tag_id as string))
+    : null;
+  if (hasAutoTagId && autoTagId) {
+    const tagExists = await c.env.DB
+      .prepare(`SELECT 1 FROM tags WHERE id = ?`)
+      .bind(autoTagId)
+      .first<{ 1: number }>();
+    if (!tagExists) return c.json({ error: 'tag_not_found' }, 400);
+  }
+  if (hasAutoTagId) {
+    await c.env.DB
+      .prepare(
+        `UPDATE menus
+            SET name = ?, category_label = ?, description = ?,
+                duration_minutes = ?, buffer_after_minutes = ?,
+                base_price = ?, sort_order = ?, is_active = ?, auto_tag_id = ?,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')
+          WHERE id = ? AND line_account_id = ?`,
+      )
+      .bind(
+        b.name,
+        b.category_label ?? null,
+        b.description ?? null,
+        b.duration_minutes,
+        b.buffer_after_minutes ?? 0,
+        b.base_price,
+        b.sort_order ?? 0,
+        b.is_active === false ? 0 : 1,
+        autoTagId,
+        id,
+        accountId,
+      )
+      .run();
+  } else {
+    await c.env.DB
+      .prepare(
+        `UPDATE menus
+            SET name = ?, category_label = ?, description = ?,
+                duration_minutes = ?, buffer_after_minutes = ?,
+                base_price = ?, sort_order = ?, is_active = ?,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')
+          WHERE id = ? AND line_account_id = ?`,
+      )
+      .bind(
+        b.name,
+        b.category_label ?? null,
+        b.description ?? null,
+        b.duration_minutes,
+        b.buffer_after_minutes ?? 0,
+        b.base_price,
+        b.sort_order ?? 0,
+        b.is_active === false ? 0 : 1,
+        id,
+        accountId,
+      )
+      .run();
+  }
   return c.json({ ok: true });
 });
 

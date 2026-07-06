@@ -58,6 +58,11 @@ three environment variables (see
 Cookies are `SameSite=None; Secure`; CSRF protects mutations; CORS is locked to
 the allowlist.
 
+Cloudflare Pages also prints per-deployment preview URLs such as
+`https://<hash>.<admin>.pages.dev`. Those preview origins are treated as the
+same admin Pages project, so clicking Wrangler's fresh deployment URL does not
+cause a login-time CORS failure.
+
 > ⚠️ Browsers are phasing out third-party cookies (Safari ITP blocks them
 > outright). For long-term robustness prefer option (b).
 
@@ -66,27 +71,6 @@ one registrable domain — e.g. `admin.example.com` (Pages custom domain) and
 `api.example.com` (Worker route). Set `ADMIN_ORIGIN=https://admin.example.com`
 and leave `ADMIN_ALLOW_CROSS_SITE` unset; cookies use `SameSite=Lax` and no
 third-party-cookie restrictions apply.
-
-### Setting these in the fork + GitHub Actions flow
-
-Set them as **repository Variables** (Settings → Secrets and variables →
-Actions → Variables), the same place you set `WORKER_NAME` / `VITE_LIFF_ID`:
-
-| Variable | Value |
-|----------|-------|
-| `ADMIN_ORIGIN` | `https://<admin>.pages.dev` (or your admin custom domain) |
-| `ADMIN_ALLOW_CROSS_SITE` | `true` for the cross-site Pages↔Workers default; omit for same-site |
-| `WORKER_URL` | `https://<worker>.workers.dev` (your Worker's public URL) |
-
-`deploy-cloudflare-worker.yml` bakes these into the deployed Worker config on
-every deploy, so they survive redeploys.
-
-> 🚫 **Do not** add these by hand as plain Worker variables in the Cloudflare
-> dashboard. A `wrangler deploy` from config that doesn't include them will
-> drop them, and the admin login breaks with a CORS error
-> (`No 'Access-Control-Allow-Origin' header`). Use repo Variables (above) so
-> they are part of the deployed config — or, for an existing install, set them
-> as Worker **secrets** (`wrangler secret bulk`), which persist across deploys.
 
 ### Topology guard
 

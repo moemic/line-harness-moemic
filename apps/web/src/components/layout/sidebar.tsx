@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation'
 import { useAccount } from '@/contexts/account-context'
 import type { AccountWithStats } from '@/contexts/account-context'
 import { countryFlag } from '@/lib/country-flag'
+import { UNANSWERED_REFRESH_EVENT } from '@/lib/events'
 
 const appVersion = process.env.APP_VERSION || '0.0.0'
 const appCommitSha = process.env.APP_COMMIT_SHA || 'local'
@@ -206,23 +207,33 @@ export default function Sidebar() {
   }, [])
 
   // 未対応件数 polling — メニュー項目にバッジを出す。5 分間隔。
+  // (裏の countUnanswered は messages_log 全走査を含む重い集計なので間隔は詰めない。)
+  // チャット画面での status 変更・手動返信直後は UNANSWERED_REFRESH_EVENT で
+  // 即時再取得する (ポーリング待ちだと操作してもバッジが減らないと感じるため)。
   const [unansweredCount, setUnansweredCount] = useState<number>(0)
   useEffect(() => {
     let cancelled = false
+    // 連続操作で fetch が並走した際、遅い古いレスポンスが新しい値を上書きしない
+    // ように発行順 seq でガードする。
+    let seq = 0
     const fetchCount = async () => {
+      const mySeq = ++seq
       try {
         const { api } = await import('@/lib/api')
         const res = await api.inbox.unanswered.count()
-        if (!cancelled && res.success) setUnansweredCount(res.data.total)
+        if (!cancelled && mySeq === seq && res.success) setUnansweredCount(res.data.total)
       } catch {
         // サイレント失敗
       }
     }
     fetchCount()
     const id = setInterval(fetchCount, 5 * 60_000)
+    const onRefresh = () => { void fetchCount() }
+    window.addEventListener(UNANSWERED_REFRESH_EVENT, onRefresh)
     return () => {
       cancelled = true
       clearInterval(id)
+      window.removeEventListener(UNANSWERED_REFRESH_EVENT, onRefresh)
     }
   }, [])
 

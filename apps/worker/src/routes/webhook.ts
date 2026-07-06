@@ -516,6 +516,11 @@ async function handleEvent(
       )
       .bind(crypto.randomUUID(), friend.id, msg.type, finalContent, jstNow())
       .run();
+    // text と同様、非 text の自発メッセージ (画像/スタンプ等) でも chat を unread に戻す。
+    // これが無いと resolved 除外 (unanswered-inbox CANDIDATES_SQL) が「解決済み後に
+    // 画像だけ送ってきた友だち」をバッジ・未対応一覧から永久に落としてしまう。
+    // 非 text は auto_reply keyword にマッチし得ないので常に要対応扱いで正しい。
+    await upsertChatOnMessage(db, friend.id);
     return;
   }
 

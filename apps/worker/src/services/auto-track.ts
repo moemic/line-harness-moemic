@@ -48,7 +48,7 @@ const SKIP_PATTERNS = [
   /\/t\/[0-9a-f-]{36}/,       // already a tracking link
   /liff\.line\.me/,            // LIFF URLs
   /line\.me\/R\//,             // LINE deep links
-  /line-harness.*\.workers\.dev/, // default LINE Harness worker URLs
+  /your-worker-name/,           // our own worker
 ];
 
 function shouldSkip(url: string): boolean {

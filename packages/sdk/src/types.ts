@@ -327,6 +327,9 @@ export interface TrackedLink {
   rewardTemplateId: string | null
   isActive: boolean
   clickCount: number
+  ogTitle: string | null
+  ogDescription: string | null
+  ogImageUrl: string | null
   createdAt: string
   updatedAt: string
 }
@@ -349,6 +352,9 @@ export interface CreateTrackedLinkInput {
   scenarioId?: string | null
   introTemplateId?: string | null
   rewardTemplateId?: string | null
+  ogTitle?: string | null
+  ogDescription?: string | null
+  ogImageUrl?: string | null
 }
 
 export interface UpdateTrackedLinkInput {
@@ -358,6 +364,9 @@ export interface UpdateTrackedLinkInput {
   introTemplateId?: string | null
   rewardTemplateId?: string | null
   isActive?: boolean
+  ogTitle?: string | null
+  ogDescription?: string | null
+  ogImageUrl?: string | null
 }
 
 // ─── Forms ──────────────────────────────────────────────
@@ -382,6 +391,9 @@ export interface Form {
   saveToMetadata: boolean
   isActive: boolean
   submitCount: number
+  ogTitle: string | null
+  ogDescription: string | null
+  ogImageUrl: string | null
   createdAt: string
   updatedAt: string
 }
@@ -395,6 +407,9 @@ export interface CreateFormInput {
   onSubmitMessageType?: 'text' | 'flex' | null
   onSubmitMessageContent?: string | null
   saveToMetadata?: boolean
+  ogTitle?: string | null
+  ogDescription?: string | null
+  ogImageUrl?: string | null
 }
 
 export interface UpdateFormInput {
@@ -407,6 +422,9 @@ export interface UpdateFormInput {
   onSubmitMessageContent?: string | null
   saveToMetadata?: boolean
   isActive?: boolean
+  ogTitle?: string | null
+  ogDescription?: string | null
+  ogImageUrl?: string | null
 }
 
 export interface FormSubmission {

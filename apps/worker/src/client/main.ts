@@ -130,6 +130,34 @@ function showFriendAdd(profile: { displayName: string; pictureUrl?: string }) {
       const { friendFlag } = await liff.getFriendship();
       if (!friendFlag) return;
 
+      // Re-link now that the friends row exists. For first-time users the
+      // pre-add POST in linkAndAddFlow ran before the follow webhook created
+      // the friends row (404), dropping ref/ig/iga/igan attribution on the
+      // no-form path — this retry persists it once friendship is confirmed.
+      try {
+        const idToken = liff.getIDToken();
+        if (idToken) {
+          const fp = await liff.getProfile();
+          const params = new URLSearchParams(window.location.search);
+          const res = await apiCall('/api/liff/link', {
+            method: 'POST',
+            body: JSON.stringify({
+              idToken,
+              displayName: fp.displayName,
+              existingUuid: getSavedUuid(),
+              ref: getRef() || undefined,
+              ig: params.get('ig') || undefined,
+              iga: params.get('iga') || undefined,
+              igan: params.get('igan') || undefined,
+            }),
+          });
+          if (res.ok) {
+            const data = await res.json() as { success: boolean; data?: { userId?: string } };
+            if (data?.data?.userId) saveUuid(data.data.userId);
+          }
+        }
+      } catch { /* best-effort */ }
+
       // Send form link if form param exists (was lost during friend-add flow)
       const formParam = new URLSearchParams(window.location.search).get('form');
       if (formParam && !formLinkSent) {
@@ -148,6 +176,8 @@ function showFriendAdd(profile: { displayName: string; pictureUrl?: string }) {
               gate: params.get('gate') || '',
               xh: params.get('xh') || '',
               ig: params.get('ig') || '',
+              iga: params.get('iga') || '',
+              igan: params.get('igan') || '',
             }),
           });
         } catch { /* best-effort */ }
@@ -227,6 +257,8 @@ async function linkAndAddFlow() {
         existingUuid: existingUuid,
         ref: ref,
         ig: linkParams.get('ig') || '',
+        iga: linkParams.get('iga') || '',
+        igan: linkParams.get('igan') || '',
       }),
     }).then(async (res) => {
       if (res.ok) {
@@ -289,6 +321,8 @@ async function linkAndAddFlow() {
               gate: params.get('gate') || '',
               xh: params.get('xh') || '',
               ig: params.get('ig') || '',
+              iga: params.get('iga') || '',
+              igan: params.get('igan') || '',
             }),
           });
         } catch { /* best-effort */ }
@@ -330,7 +364,10 @@ async function initSalonBooking(): Promise<void> {
 
   const existingUuid = getSavedUuid();
   const ref = getRef();
-  const ig = new URLSearchParams(window.location.search).get('ig');
+  const bookingParams = new URLSearchParams(window.location.search);
+  const ig = bookingParams.get('ig');
+  const iga = bookingParams.get('iga');
+  const igan = bookingParams.get('igan');
 
   // ② Silent UUID linking (fire-and-forget; booking API は id_token verify で
   //    認証するので待つ必要はない)。
@@ -342,6 +379,8 @@ async function initSalonBooking(): Promise<void> {
       existingUuid,
       ref: ref || undefined,
       ig: ig || undefined,
+      iga: iga || undefined,
+      igan: igan || undefined,
     }),
   })
     .then(async (res) => {
@@ -403,6 +442,7 @@ async function initEventBooking(initialKind: 'detail' | 'history'): Promise<void
 
   const existingUuid = getSavedUuid();
   const ref = getRef();
+  const eventParams = new URLSearchParams(window.location.search);
 
   // UUID linking (best-effort)
   apiCall('/api/liff/link', {
@@ -412,6 +452,9 @@ async function initEventBooking(initialKind: 'detail' | 'history'): Promise<void
       displayName: profile.displayName,
       existingUuid,
       ref: ref || undefined,
+      ig: eventParams.get('ig') || undefined,
+      iga: eventParams.get('iga') || undefined,
+      igan: eventParams.get('igan') || undefined,
     }),
   })
     .then(async (res) => {
