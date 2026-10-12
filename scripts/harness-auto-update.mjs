@@ -224,6 +224,9 @@ async function run(mode) {
   if (mode === 'update') {
     git(['config', 'user.name', 'github-actions[bot]']);
     git(['config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com']);
+    // Git連携で解決できる所有者をauthorにし、自動処理はcommitterとして記録する。
+    process.env.GIT_AUTHOR_NAME = 'moemic';
+    process.env.GIT_AUTHOR_EMAIL = '15962725+moemic@users.noreply.github.com';
   }
   const selected = process.env.HARNESS_TARGET === 'both' || !process.env.HARNESS_TARGET ? Object.keys(targets) : [process.env.HARNESS_TARGET];
   for (const name of selected) {
