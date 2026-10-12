@@ -176,6 +176,11 @@ async function prepareSource(name, state, release, update) {
     git(['commit', '-m', 'Preserve installed X Harness customizations'], source);
   }
   let sourceSha = state.sourceSha;
+  if (name === 'line' && update) {
+    // dry-run の隔離 checkout でも上流 merge に committer が必要。
+    git(['config', 'user.name', 'github-actions[bot]'], source);
+    git(['config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com'], source);
+  }
   if (update) {
     git(['fetch', '--no-tags', `https://github.com/${target.repository}.git`, `refs/tags/${release.tag_name}`], source);
     sourceSha = git(['rev-parse', 'FETCH_HEAD^{commit}'], source);
