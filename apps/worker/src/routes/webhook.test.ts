@@ -1,4 +1,4 @@
-import { describe, expect, test, vi, beforeEach } from 'vitest';
+import { describe, expect, test, vi, beforeEach, afterEach } from 'vitest';
 import { Hono } from 'hono';
 
 const lineClientMocks = vi.hoisted(() => ({
@@ -27,6 +27,7 @@ vi.mock('@line-crm/db', () => ({
   getEntryRouteByRefCode: vi.fn(),
   getMessageTemplateById: vi.fn(),
   getTemplateById: vi.fn(),
+  applyMileageRulesForEvent: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock('@line-crm/line-sdk', async () => {
@@ -74,6 +75,7 @@ import {
   upsertFriend,
 } from '@line-crm/db';
 import { fireEvent } from '../services/event-bus.js';
+import { dispatchLineProxyLocally } from '../services/local-line-proxy.js';
 import { webhook } from './webhook.js';
 
 function setupApp() {
@@ -97,6 +99,34 @@ const baseExecutionCtx = {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(getLineAccounts).mockResolvedValue([]);
+});
+afterEach(() => vi.unstubAllGlobals());
+
+describe('既存AI Bridgeの引き継ぎ', () => {
+  test.each([
+    { title: '返信後はtokenを再利用しない', silent: false, status: 200, consumed: true },
+    { title: 'silentルールを優先する', silent: true, status: 200, consumed: false },
+    { title: 'bridge失敗時はtokenを後段へ渡す', silent: false, status: 503, consumed: false },
+  ])('$title', async ({ silent, status, consumed }) => {
+    vi.mocked(jstNow).mockReturnValue('2026-10-12T12:00:00.000+09:00');
+    vi.mocked(verifySignature).mockResolvedValue(true);
+    vi.mocked(getFriendByLineUserId).mockResolvedValue({ id: 'friend-1', line_user_id: 'U-existing', display_name: 'Existing Friend', picture_url: null, status_message: null, is_following: 1, user_id: null, line_account_id: null, metadata: '{}', first_tracked_link_id: null, created_at: 'now', updated_at: 'now' });
+    const stmt = { bind: vi.fn(), run: vi.fn().mockResolvedValue({}), all: vi.fn().mockResolvedValue({ results: silent ? [{ id: 'rule', keyword: 'こんにちは', match_type: 'exact', response_type: 'silent', response_content: '', template_id: null }] : [] }) };
+    stmt.bind.mockReturnValue(stmt);
+    const db = { prepare: vi.fn().mockReturnValue(stmt) } as unknown as D1Database;
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ reply: 'AIの返信' }), { status }));
+    vi.stubGlobal('fetch', fetchMock);
+    const context = { waitUntil: vi.fn(), passThroughOnException: vi.fn(), props: {} } as unknown as ExecutionContext;
+    const result = await setupApp().request('/webhook', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Line-Signature': 'A'.repeat(43) + '=' }, body: JSON.stringify({ destination: 'bot', events: [{ type: 'message', replyToken: 'reply-token', message: { type: 'text', id: 'message', text: 'こんにちは' }, timestamp: 1, source: { type: 'user', userId: 'U-existing' }, webhookEventId: 'event', deliveryContext: { isRedelivery: false }, mode: 'active' }] }) }, { ...baseEnv, DB: db, AI_BRIDGE_URL: 'https://bridge.example', WORKER_URL: 'https://worker.example' }, context);
+    expect(result.status).toBe(200);
+    await vi.mocked(context.waitUntil).mock.calls[0][0];
+    expect(fetchMock).toHaveBeenCalledTimes(silent ? 0 : 1);
+    if (!silent) {
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ message: 'こんにちは', lineUserId: 'U-existing', lineDisplayName: 'Existing Friend', replyToken: 'reply-token' });
+    }
+    expect(dispatchLineProxyLocally).toHaveBeenCalledTimes(consumed ? 1 : 0);
+    expect(fireEvent).toHaveBeenCalledWith(db, 'message_received', expect.objectContaining({ replyToken: consumed ? undefined : 'reply-token' }), 'env-default-token', null);
+  });
 });
 
 describe('POST /webhook — DoS defenses (#104)', () => {

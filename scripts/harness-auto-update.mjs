@@ -140,7 +140,17 @@ async function build(name, source, settings, account, crons) {
     command('pnpm', ['--filter', '@line-crm/shared', '--filter', '@line-crm/line-sdk', '--filter', '@line-crm/db', '--filter', '@line-harness/update-engine', 'build'], source);
     command('pnpm', ['--filter', 'worker', 'typecheck'], source);
     command('pnpm', ['--filter', 'worker', 'test'], source);
-    command('pnpm', ['--filter', 'worker', 'build'], source);
+    const versionPath = resolve(source, 'apps/worker/src/_version.ts');
+    const versionSource = readFileSync(versionPath, 'utf8');
+    const packageVersion = JSON.parse(readFileSync(resolve(source, 'package.json'), 'utf8')).version;
+    compareReleaseTags(packageVersion, packageVersion);
+    try {
+      // ソース版は公式bundleのhashを名乗らず、実際にビルドするバージョンだけを記録する。
+      writeFileSync(versionPath, versionSource.replace(/^export const BUNDLE_VERSION = .*;$/m, `export const BUNDLE_VERSION = ${JSON.stringify(packageVersion)};`));
+      command('pnpm', ['--filter', 'worker', 'build'], source);
+    } finally {
+      writeFileSync(versionPath, versionSource);
+    }
   } else {
     const typeConfig = resolve(source, 'apps/worker/tsconfig.harness-update.json');
     writeFileSync(typeConfig, JSON.stringify({ extends: './tsconfig.json', exclude: ['src/**/*.test.ts', 'src/**/__tests__/**'] }));
@@ -176,7 +186,7 @@ async function waitForVercel(sha, token) {
 }
 
 async function run(mode) {
-  if (!['audit', 'check', 'dry-run', 'update'].includes(mode)) throw new Error('実行モードが不正です');
+  if (!['check', 'dry-run', 'update'].includes(mode)) throw new Error('実行モードが不正です');
   if (mode === 'update' && process.env.GITHUB_REF !== 'refs/heads/main') throw new Error('本番更新はmain上でのみ実行できます');
   const { CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: token, GH_TOKEN: githubToken } = process.env;
   if (!account || !token || !githubToken) throw new Error('既存のCloudflare／GitHub認証が必要です');
@@ -208,14 +218,16 @@ async function run(mode) {
     await publicHealth(target);
     if (name === 'x') await json(`${base}/pages/projects/${target.pages}`, token);
     console.log(JSON.stringify({ harness: name, registeredRelease: state.releaseTag, latestRelease: release.tag_name, databaseVerified: true, workerCodeVerified: true, newerRelease: newer, mode }));
-    if (mode === 'audit' || mode === 'check' || (!newer && mode !== 'dry-run')) continue;
+    if (mode === 'check' || (!newer && mode !== 'dry-run')) continue;
     const schedules = await json(`${url}/schedules`, token);
     const { source, sourceSha, names, sourcePatch } = await prepareSource(name, state, release, newer);
     const configPath = await build(name, source, settings, account, schedules.schedules.map(s => s.cron));
     const engine = await import(pathToFileURL(resolve(root, 'packages/update-engine/dist/index.mjs')).href);
     const migrations = new Map(names.map(file => [file, readFileSync(resolve(source, 'packages/db/migrations', file))]));
     for (const sql of migrations.values()) {
-      for (const statement of engine.splitSqlStatements(sql.toString('utf8'))) if (/^\s*(DELETE|REPLACE)\b/i.test(statement)) throw new Error('データ削除を含むmigrationは自動適用しません');
+      for (const statement of engine.splitSqlStatements(sql.toString('utf8'))) {
+        if (!/^\s*(CREATE|ALTER|INSERT|UPDATE|PRAGMA)\b/i.test(engine.stripSqlComments(statement))) throw new Error('追加系以外のSQLは確認してから適用します');
+      }
     }
     console.log(JSON.stringify({ harness: name, sourceSha, migrations: names, buildVerified: true, deploymentConfigVerified: true }));
     if (mode === 'dry-run') continue;
