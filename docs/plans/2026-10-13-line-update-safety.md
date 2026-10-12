@@ -48,3 +48,12 @@ GitHub commit statusが空でもVercelはREADYで本番aliasへ配布済みだ�
 元update run38295777628は19:27:07 UTC、Vercel GitHub status欠落による確認期限切れでfailure終了。catchは旧Worker単独rollback禁止を明示し、終了後もVersion e46fae5f-11bf-4692-ad4e-36f751c450a8（0.24.2）を維持。D1前後件数は6/3/132で一致。これは公開後の実際の失敗経路であり、失敗run自体を成功とは扱わない。
 
 独立API照合済みの登録候補をline.jsonへ反映する。Worker再配布・DB復元なし。配布確認はVercel本番aliasのmarkerを確認する方式へ修正し、初回markerは実際に配布されたコードrevision2a7c4201を示す。定期LINE保留は、marker読取とcheck成功を確認してから解除する。
+
+
+## 最終確認と保留解除
+
+登録修復・実配布確認修正commit a87afa868ccb0a11ce01490bbbed49cff4c251b9を反映。LINE check run38297894935成功、最終Core Safety CI run38297899424成功。本番alias/harness-release.jsonはHTTP200、releaseTag v0.24.2・sourceRevision2a7c4201659e2b3bf39af0adaa9ff5eef73c47fcで一致し、waitForVercelの実handlerもGitHub statusなしで成功した。
+
+この確認後に定期LINEupdate除外を削除し、既存手動配布スイッチをtrueへ戻す。旧Worker単独rollback禁止、両workflow排他、手動main freshness確認、D1前後件数確認、実配布marker確認は継続する。元run38295777628はfailureのまま正確に記録し、後続の登録照合check成功と区別する。
+
+残る未確認: ログイン後の管理画面機能、実LINE送信、次の新しい正式版での自然なschedule更新。これらを確認済みとは扱わない。今回のv0.24.2は両側の実配布とD1件数・設定保全を確認済み。

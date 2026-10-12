@@ -273,11 +273,6 @@ async function run(mode) {
   for (const name of selected) {
     const target = targets[name];
     if (!target) throw new Error('対象Harnessが不正です');
-    // LINE は Worker・管理画面の安全な復旧手順を検証するまで本番更新を保留する。
-    if (name === 'line' && mode === 'update' && !(process.env.GITHUB_EVENT_NAME === 'workflow_dispatch' && process.env.HARNESS_TARGET === 'line')) {
-      console.log('LINE 本番更新は安全修正の検証完了まで保留中です');
-      continue;
-    }
     const statePath = resolve(root, `config/harness-updates/${name}.json`);
     const state = JSON.parse(readFileSync(statePath, 'utf8'));
     const url = `${base}/workers/scripts/${target.worker}`;
