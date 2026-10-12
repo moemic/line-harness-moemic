@@ -376,7 +376,8 @@ describe('trackConversion + attribution integration', () => {
       id: 't1',
       refCode: 'refx',
       friendId: 'friend-x',
-      createdAt: jstDaysAgo(2),
+      // 実時計を使う統合経路では、固定日付のfixtureが90日窓から外れないようにする。
+      createdAt: new Date(Date.now() - 2 * 86400000).toISOString(),
     });
 
     const ev = (await trackConversion(db, {
