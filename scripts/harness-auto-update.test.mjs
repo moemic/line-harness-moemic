@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { targets, validateDatabase, compareReleaseTags, preserveConfig, migrationNames, assertPreservedSettings, assertAdditiveStatement, publicHealth } from './harness-auto-update.mjs';
+import { targets, validateDatabase, compareReleaseTags, preserveConfig, migrationNames, assertPreservedSettings, assertAdditiveStatement, publicHealth, checkRecordDue, assertActiveUpload } from './harness-auto-update.mjs';
 
 for (const target of Object.values(targets)) {
   validateDatabase({ bindings: [{ type: 'd1', name: 'DB', id: target.database }] }, target);
@@ -43,3 +43,14 @@ try {
   globalThis.fetch = async () => new Response('', { status: 401 });
   await publicHealth(targets.line);
 } finally { globalThis.fetch = realFetch; }
+
+const checkTime = Date.parse('2026-10-12T12:00:00Z');
+assert.equal(checkRecordDue(null, checkTime), true);
+assert.equal(checkRecordDue({ checkedAt: '2026-09-12T12:00:00Z' }, checkTime), true);
+assert.equal(checkRecordDue({ checkedAt: '2026-09-13T12:00:00Z' }, checkTime), false);
+assert.throws(() => checkRecordDue({ checkedAt: '壊れた日時' }, checkTime));
+
+const activeUpload = { versions: [{ version_id: 'current' }] };
+assertActiveUpload(activeUpload, { items: [{ id: 'older', number: 1 }, { id: 'current', number: 2 }] });
+assert.throws(() => assertActiveUpload(activeUpload, { items: [{ id: 'unpublished', number: 3 }, { id: 'current', number: 2 }] }));
+assert.throws(() => assertActiveUpload(activeUpload, { items: [] }));

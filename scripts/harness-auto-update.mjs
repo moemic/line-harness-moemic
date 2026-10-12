@@ -1,7 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, mkdtempSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, existsSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -64,6 +64,18 @@ export function migrationNames(changes) {
     if (status !== 'A' || !/^packages\/db\/migrations\/[\w.-]+\.sql$/.test(path)) throw new Error('既存migrationの変更・削除は自動適用しません');
     return basename(path);
   });
+}
+
+export function assertActiveUpload(active, versions) {
+  const latest = versions.items?.reduce((a, b) => a && a.number > b.number ? a : b, null);
+  if (!latest || latest.id !== active.versions[0].version_id) throw new Error('最新アップロードと稼働Versionが異なるため配置を確認してください');
+}
+
+export function checkRecordDue(record, now) {
+  if (!record) return true;
+  const checkedAt = Date.parse(record.checkedAt);
+  if (!Number.isFinite(checkedAt)) throw new Error('最終確認記録の日時が不正です');
+  return now - checkedAt >= 30 * 86400000;
 }
 
 export function assertAdditiveStatement(statement) {
@@ -225,6 +237,7 @@ async function run(mode) {
     const deployments = await json(`${url}/deployments`, token);
     const active = deployments.deployments[0];
     if (active.versions.length !== 1 || active.versions[0].percentage !== 100) throw new Error('段階的デプロイ中のWorkerは更新できません');
+    assertActiveUpload(active, await json(`${url}/versions`, token));
     const currentHash = await workerHash(url, token);
     if (currentHash !== state.codeHash) throw new Error(`${target.worker}: 登録後にコードが変更されています。既存の修正を確認してください`);
     const release = await json(`https://api.github.com/repos/${target.repository}/releases/latest`, githubToken);
@@ -278,6 +291,18 @@ async function run(mode) {
         await engine.rollbackPagesDeployment({ creds, projectName: target.pages, deploymentId: pagesBefore });
       }
       throw error;
+    }
+  }
+  if (mode === 'update') {
+    const recordPath = resolve(root, 'config/harness-updates/last-check.json');
+    const record = existsSync(recordPath) ? JSON.parse(readFileSync(recordPath, 'utf8')) : null;
+    if (checkRecordDue(record, Date.now())) {
+      // 公開repoの60日無活動によるschedule停止を防ぐため、正常照合結果を月1回保存する。
+      writeFileSync(recordPath, JSON.stringify({ checkedAt: new Date().toISOString(), targets: selected }, null, 2) + '\n');
+      git(['add', 'config/harness-updates/last-check.json']);
+      git(['commit', '-m', 'chore: record verified Harness release check']);
+      git(['push', 'origin', 'HEAD:main']);
+      console.log('正常確認の記録を保存しました');
     }
   }
 }
