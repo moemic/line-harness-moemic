@@ -3,9 +3,14 @@ name: Deploy Cloudflare Worker
 on:
   workflow_dispatch:
 
+# 自動更新と手動 Worker 配布を同時実行しない。稼働中の配布は中断しない。
+concurrency:
+  group: harness-automatic-update
+  cancel-in-progress: false
+
 jobs:
   deploy:
-    if: github.repository != 'Shudesu/line-harness-oss' && vars.LINE_HARNESS_CLOUDFLARE_DEPLOY == 'true'
+    if: github.repository != 'Shudesu/line-harness-oss' && github.ref == 'refs/heads/main' && vars.LINE_HARNESS_CLOUDFLARE_DEPLOY == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

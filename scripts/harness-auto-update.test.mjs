@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { targets, validateDatabase, compareReleaseTags, preserveConfig, migrationNames, assertPreservedSettings, assertAdditiveStatement, publicHealth, checkRecordDue, assertActiveUpload, api } from './harness-auto-update.mjs';
+import { targets, validateDatabase, compareReleaseTags, preserveConfig, migrationNames, assertPreservedSettings, assertAdditiveStatement, publicHealth, checkRecordDue, assertActiveUpload, api, recoverUpdateFailure } from './harness-auto-update.mjs';
 
 for (const target of Object.values(targets)) {
   validateDatabase({ bindings: [{ type: 'd1', name: 'DB', id: target.database }] }, target);
@@ -65,3 +65,16 @@ try {
   await assert.rejects(() => api('https://api.example/write', 'test-token', { method: 'POST' }));
   assert.equal(writes, 1);
 } finally { globalThis.fetch = realFetch; }
+
+// 公開前・公開結果不明・管理画面成功後・記録保存失敗を全て照合する。
+for (const stage of ['migration', 'worker deploy uncertain', 'worker health', 'main push uncertain', 'Vercel failure', 'admin HTTP after Vercel success', 'state write', 'state push']) {
+  let rollbackCalls = 0;
+  const failure = new Error(stage);
+  await assert.rejects(() => recoverUpdateFailure('line', failure, async () => { rollbackCalls++; }), error => error.cause === failure && error.message.includes('旧 Worker 単独 rollback は禁止'));
+  assert.equal(rollbackCalls, 0, stage);
+}
+let xRollbackCalls = 0;
+const xFailure = new Error('既存X処理');
+await assert.rejects(() => recoverUpdateFailure('x', xFailure, async () => { xRollbackCalls++; }), error => error === xFailure);
+assert.equal(xRollbackCalls, 1);
+console.log('LINE異常系8段階の旧Worker単独rollback禁止・既存X復旧のチェック成功');

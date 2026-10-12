@@ -89,6 +89,16 @@ export function assertPreservedSettings(before, after, target) {
   for (const flag of before.compatibility_flags ?? []) if (!after.compatibility_flags?.includes(flag)) throw new Error('既存のcompatibility flagが失われました');
 }
 
+// LINE v0.24.2 は保存済みデータが旧 Worker と非互換になり得る。
+// 公開結果が不明な場合も旧版へ戻さず、新版とデータを保全する。
+export async function recoverUpdateFailure(name, error, rollback) {
+  if (name === 'line') {
+    throw new Error(`LINE 更新未完了。旧 Worker 単独 rollback は禁止です。稼働版・管理画面・main・D1復旧地点を照合し、新版へ復旧してください: ${error.message}`, { cause: error });
+  }
+  await rollback();
+  throw error;
+}
+
 const root = process.cwd();
 const runtime = resolve(root, '.harness-runtime');
 const secretKeys = ['CLOUDFLARE_API_TOKEN', 'GH_TOKEN', 'VERCEL_TOKEN', 'VERCEL_ORG_ID', 'VERCEL_PROJECT_ID'];
@@ -307,11 +317,12 @@ async function run(mode) {
       git(['push', 'origin', 'HEAD:main']);
       console.log(`${name}: ${release.tag_name} の自動更新と応答確認に成功しました`);
     } catch (error) {
-      await engine.deployWorkerVersion({ creds, scriptName: target.worker, versionId: active.versions[0].version_id });
-      if (pagesBefore && (await json(`${base}/pages/projects/${target.pages}`, token)).canonical_deployment.id !== pagesBefore) {
-        await engine.rollbackPagesDeployment({ creds, projectName: target.pages, deploymentId: pagesBefore });
-      }
-      throw error;
+      await recoverUpdateFailure(name, error, async () => {
+        await engine.deployWorkerVersion({ creds, scriptName: target.worker, versionId: active.versions[0].version_id });
+        if (pagesBefore && (await json(`${base}/pages/projects/${target.pages}`, token)).canonical_deployment.id !== pagesBefore) {
+          await engine.rollbackPagesDeployment({ creds, projectName: target.pages, deploymentId: pagesBefore });
+        }
+      });
     }
   }
   if (mode === 'update') {
