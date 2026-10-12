@@ -142,8 +142,8 @@ async function build(name, source, settings, account, crons) {
     command('pnpm', ['--filter', 'worker', 'test'], source);
     command('pnpm', ['--filter', 'worker', 'build'], source);
   } else {
-    const typeConfig = resolve(runtime, 'x-production-tsconfig.json');
-    writeFileSync(typeConfig, JSON.stringify({ extends: resolve(source, 'apps/worker/tsconfig.json'), exclude: [resolve(source, 'apps/worker/src/**/*.test.ts'), resolve(source, 'apps/worker/src/**/__tests__/**')] }));
+    const typeConfig = resolve(source, 'apps/worker/tsconfig.harness-update.json');
+    writeFileSync(typeConfig, JSON.stringify({ extends: './tsconfig.json', exclude: ['src/**/*.test.ts', 'src/**/__tests__/**'] }));
     // 上流のテスト用mockの型エラーを本番コンパイルに混ぜない。テスト自体は次で全件実行する。
     command('pnpm', ['--filter', 'worker', 'exec', 'tsc', '--noEmit', '--project', typeConfig], source);
     command('pnpm', ['test'], source);
