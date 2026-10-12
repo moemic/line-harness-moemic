@@ -99,11 +99,24 @@ function command(program, args, cwd = root, authenticated = false, capture = fal
   return execFileSync(program, args, { cwd, env, encoding: 'utf8', stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit', maxBuffer: 16 * 1024 * 1024 });
 }
 const git = (args, cwd = root) => command('git', args, cwd, true, true).trim();
-async function api(url, token, options = {}) {
-  const response = await fetch(url, { ...options, signal: AbortSignal.timeout(30000), headers: { ...options.headers, Authorization: `Bearer ${token}`, 'User-Agent': 'Harness-Auto-Update' } });
-  if (!response.ok) throw new Error(`API確認失敗: ${new URL(url).hostname} HTTP ${response.status}`);
+export async function api(url, token, options = {}) {
+  let response;
+  const endpoint = `${new URL(url).hostname}${new URL(url).pathname}`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      response = await fetch(url, { ...options, signal: AbortSignal.timeout(30000), headers: { ...options.headers, Authorization: `Bearer ${token}`, 'User-Agent': 'Harness-Auto-Update' } });
+      break;
+    } catch (error) {
+      // 応答のない読み取りだけを一度再照合し、書き込みを重複実行しない。
+      if ((options.method ?? 'GET') !== 'GET' || attempt === 1) throw new Error(`API接続失敗: ${endpoint} (${error.name})`);
+      console.log(`API読み取りを一度再照合します: ${endpoint}`);
+      await delay(1000);
+    }
+  }
+  if (!response.ok) throw new Error(`API確認失敗: ${endpoint} HTTP ${response.status}`);
   return response;
 }
+
 async function json(url, token, options) {
   const data = await (await api(url, token, options)).json();
   if (data.success === false) throw new Error('Cloudflare API確認失敗');

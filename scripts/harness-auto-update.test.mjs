@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { targets, validateDatabase, compareReleaseTags, preserveConfig, migrationNames, assertPreservedSettings, assertAdditiveStatement, publicHealth, checkRecordDue, assertActiveUpload } from './harness-auto-update.mjs';
+import { targets, validateDatabase, compareReleaseTags, preserveConfig, migrationNames, assertPreservedSettings, assertAdditiveStatement, publicHealth, checkRecordDue, assertActiveUpload, api } from './harness-auto-update.mjs';
 
 for (const target of Object.values(targets)) {
   validateDatabase({ bindings: [{ type: 'd1', name: 'DB', id: target.database }] }, target);
@@ -54,3 +54,14 @@ const activeUpload = { versions: [{ version_id: 'current' }] };
 assertActiveUpload(activeUpload, { items: [{ id: 'older', number: 1 }, { id: 'current', number: 2 }] });
 assert.throws(() => assertActiveUpload(activeUpload, { items: [{ id: 'unpublished', number: 3 }, { id: 'current', number: 2 }] }));
 assert.throws(() => assertActiveUpload(activeUpload, { items: [] }));
+
+try {
+  let reads = 0;
+  globalThis.fetch = async () => { if (++reads === 1) throw new TypeError('通信失敗'); return new Response('{}', { status: 200 }); };
+  assert.equal((await api('https://api.example/health', 'test-token')).status, 200);
+  assert.equal(reads, 2);
+  let writes = 0;
+  globalThis.fetch = async () => { writes++; throw new TypeError('通信失敗'); };
+  await assert.rejects(() => api('https://api.example/write', 'test-token', { method: 'POST' }));
+  assert.equal(writes, 1);
+} finally { globalThis.fetch = realFetch; }
