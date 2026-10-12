@@ -51,10 +51,3 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      - name: 一度限りのX Pages書き込み確認
-        if: inputs.mode == 'dry-run' && inputs.harness == 'x'
-        run: |
-          node --input-type=module -e 'import { readdirSync } from "node:fs"; import { execFileSync } from "node:child_process"; const folder = readdirSync(".harness-runtime").find(n => n.startsWith("x-source-")); if (!folder) throw Error("ビルド成果物なし"); execFileSync("pnpm", ["exec", "wrangler", "pages", "deploy", `.harness-runtime/${folder}/apps/web/out`, "--project-name", "x-harness-web", "--branch", "harness-auto-update-validation"], {stdio:"inherit"});'
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

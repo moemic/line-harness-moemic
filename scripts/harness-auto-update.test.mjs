@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { targets, validateDatabase, compareReleaseTags, preserveConfig, migrationNames, assertPreservedSettings } from './harness-auto-update.mjs';
+import { targets, validateDatabase, compareReleaseTags, preserveConfig, migrationNames, assertPreservedSettings, assertAdditiveStatement } from './harness-auto-update.mjs';
 
 for (const target of Object.values(targets)) {
   validateDatabase({ bindings: [{ type: 'd1', name: 'DB', id: target.database }] }, target);
@@ -31,3 +31,6 @@ assertPreservedSettings(settings, structuredClone(settings), targets.line);
 assert.throws(() => assertPreservedSettings(settings, { ...settings, bindings: settings.bindings.filter(b => b.type !== 'secret_text') }, targets.line));
 assert.throws(() => assertPreservedSettings(settings, { ...settings, compatibility_flags: [] }, targets.line));
 console.log('安定版・D1・既存設定・migration保護のチェック成功');
+
+for (const sql of ['CREATE TABLE IF NOT EXISTS items (id TEXT)', 'CREATE UNIQUE INDEX idx ON items(id)', 'ALTER TABLE items ADD COLUMN label TEXT']) assertAdditiveStatement(sql);
+for (const sql of ['DELETE FROM items', 'UPDATE items SET id = 1', 'INSERT OR REPLACE INTO items VALUES (1)', 'ALTER TABLE items DROP COLUMN label', 'ALTER TABLE items RENAME TO old', 'CREATE TRIGGER x AFTER INSERT ON items BEGIN DELETE FROM items; END']) assert.throws(() => assertAdditiveStatement(sql));

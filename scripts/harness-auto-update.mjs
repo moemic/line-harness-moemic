@@ -66,6 +66,10 @@ export function migrationNames(changes) {
   });
 }
 
+export function assertAdditiveStatement(statement) {
+  if (!/^\s*(?:CREATE\s+(?:TABLE|(?:UNIQUE\s+)?INDEX)\b|ALTER\s+TABLE\s+(?:"[^"]+"|`[^`]+`|\[[^\]]+\]|\w+)\s+ADD\s+)/i.test(statement)) throw new Error('追加DDL以外のSQLは確認してから適用します');
+}
+
 export function assertPreservedSettings(before, after, target) {
   validateDatabase(after, target);
   const fingerprint = settings => JSON.stringify(settings.bindings.map(binding => ({ name: binding.name, type: binding.type, id: binding.id ?? binding.database_id, bucket: binding.bucket_name, namespace: binding.namespace_id, text: binding.text })).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
@@ -226,7 +230,7 @@ async function run(mode) {
     const migrations = new Map(names.map(file => [file, readFileSync(resolve(source, 'packages/db/migrations', file))]));
     for (const sql of migrations.values()) {
       for (const statement of engine.splitSqlStatements(sql.toString('utf8'))) {
-        if (!/^\s*(CREATE|ALTER|INSERT|UPDATE|PRAGMA)\b/i.test(engine.stripSqlComments(statement))) throw new Error('追加系以外のSQLは確認してから適用します');
+        assertAdditiveStatement(engine.stripSqlComments(statement));
       }
     }
     console.log(JSON.stringify({ harness: name, sourceSha, migrations: names, buildVerified: true, deploymentConfigVerified: true }));
