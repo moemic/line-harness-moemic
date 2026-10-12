@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { targets, validateDatabase, compareReleaseTags, preserveConfig, migrationNames } from './harness-auto-update.mjs';
+import { targets, validateDatabase, compareReleaseTags, preserveConfig, migrationNames, assertPreservedSettings } from './harness-auto-update.mjs';
 
 for (const target of Object.values(targets)) {
   validateDatabase({ bindings: [{ type: 'd1', name: 'DB', id: target.database }] }, target);
@@ -27,4 +27,7 @@ assert.equal(config.vars.ADMIN_ORIGIN, 'placeholder');
 assert.throws(() => preserveConfig({ ...config, assets: undefined }, settings, targets.line, 'account', []));
 assert.throws(() => preserveConfig({ ...config, r2_buckets: [{ binding: 'NEW_STORAGE' }] }, settings, targets.line, 'account', []));
 assert.throws(() => preserveConfig(config, { ...settings, bindings: [...settings.bindings, { type: 'queue', name: 'NEW' }] }, targets.line, 'account', []));
+assertPreservedSettings(settings, structuredClone(settings), targets.line);
+assert.throws(() => assertPreservedSettings(settings, { ...settings, bindings: settings.bindings.filter(b => b.type !== 'secret_text') }, targets.line));
+assert.throws(() => assertPreservedSettings(settings, { ...settings, compatibility_flags: [] }, targets.line));
 console.log('安定版・D1・既存設定・migration保護のチェック成功');

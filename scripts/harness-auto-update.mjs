@@ -66,6 +66,13 @@ export function migrationNames(changes) {
   });
 }
 
+export function assertPreservedSettings(before, after, target) {
+  validateDatabase(after, target);
+  const fingerprint = settings => JSON.stringify(settings.bindings.map(binding => ({ name: binding.name, type: binding.type, id: binding.id ?? binding.database_id, bucket: binding.bucket_name, namespace: binding.namespace_id, text: binding.text })).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  if (fingerprint(before) !== fingerprint(after)) throw new Error('更新後のbinding・設定・Secret名が既存構成と一致しません');
+  for (const flag of before.compatibility_flags ?? []) if (!after.compatibility_flags?.includes(flag)) throw new Error('既存のcompatibility flagが失われました');
+}
+
 const root = process.cwd();
 const runtime = resolve(root, '.harness-runtime');
 const secretKeys = ['CLOUDFLARE_API_TOKEN', 'GH_TOKEN', 'VERCEL_TOKEN', 'VERCEL_ORG_ID', 'VERCEL_PROJECT_ID'];
@@ -135,7 +142,10 @@ async function build(name, source, settings, account, crons) {
     command('pnpm', ['--filter', 'worker', 'test'], source);
     command('pnpm', ['--filter', 'worker', 'build'], source);
   } else {
-    command('pnpm', ['--filter', 'worker', 'typecheck'], source);
+    const typeConfig = resolve(runtime, 'x-production-tsconfig.json');
+    writeFileSync(typeConfig, JSON.stringify({ extends: resolve(source, 'apps/worker/tsconfig.json'), exclude: [resolve(source, 'apps/worker/src/**/*.test.ts'), resolve(source, 'apps/worker/src/**/__tests__/**')] }));
+    // 上流のテスト用mockの型エラーを本番コンパイルに混ぜない。テスト自体は次で全件実行する。
+    command('pnpm', ['--filter', 'worker', 'exec', 'tsc', '--noEmit', '--project', typeConfig], source);
     command('pnpm', ['test'], source);
   }
   command('pnpm', ['--filter', 'web', 'build'], source, false, false, { NEXT_PUBLIC_API_URL: targets[name].url });
@@ -215,6 +225,7 @@ async function run(mode) {
     try {
       await engine.applyD1Migrations({ creds, databaseId: target.database, names, migrations });
       command('pnpm', ['--filter', 'worker', 'exec', 'wrangler', 'deploy', '--config', configPath], source, true);
+      assertPreservedSettings(settings, await json(`${url}/settings`, token), target);
       await publicHealth(target);
       if (name === 'x') {
         command('pnpm', ['exec', 'wrangler', 'pages', 'deploy', resolve(source, 'apps/web/out'), '--project-name', target.pages, '--branch', 'main', '--commit-hash', sourceSha], root, true);

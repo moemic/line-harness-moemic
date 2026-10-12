@@ -18,6 +18,7 @@ on:
 
 permissions:
   contents: write
+  statuses: read
 
 concurrency:
   group: harness-automatic-update
