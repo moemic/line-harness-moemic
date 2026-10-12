@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { targets, validateDatabase, compareReleaseTags, preserveConfig, migrationNames, assertPreservedSettings, assertAdditiveStatement, publicHealth, checkRecordDue, assertActiveUpload, api, recoverUpdateFailure } from './harness-auto-update.mjs';
+import { targets, validateDatabase, compareReleaseTags, preserveConfig, migrationNames, assertPreservedSettings, assertAdditiveStatement, publicHealth, checkRecordDue, assertActiveUpload, api, recoverUpdateFailure, adminReleaseMatches, waitForVercel } from './harness-auto-update.mjs';
 
 for (const target of Object.values(targets)) {
   validateDatabase({ bindings: [{ type: 'd1', name: 'DB', id: target.database }] }, target);
@@ -78,3 +78,24 @@ const xFailure = new Error('既存X処理');
 await assert.rejects(() => recoverUpdateFailure('x', xFailure, async () => { xRollbackCalls++; }), error => error === xFailure);
 assert.equal(xRollbackCalls, 1);
 console.log('LINE異常系8段階の旧Worker単独rollback禁止・既存X復旧のチェック成功');
+
+const marker = { releaseTag: 'v0.24.2', sourceRevision: '053f00d90bcf6318a83be89e71c8394d433ae4a2' };
+assert.equal(adminReleaseMatches(marker, marker), true);
+assert.equal(adminReleaseMatches({ ...marker, releaseTag: 'v0.24.1' }, marker), false);
+assert.equal(adminReleaseMatches({ ...marker, sourceRevision: 'other' }, marker), false);
+try {
+  let githubRequests = 0;
+  globalThis.fetch = async url => {
+    if (String(url).startsWith(targets.line.admin)) return new Response(JSON.stringify(marker));
+    githubRequests++;
+    return new Response(JSON.stringify({ statuses: [] }));
+  };
+  await waitForVercel('commit', 'test-token', marker, { attempts: 1 });
+  assert.equal(githubRequests, 0, '本番実内容が一致すればGitHub status欠落でも完了');
+  globalThis.fetch = async url => new Response(JSON.stringify(String(url).startsWith(targets.line.admin) ? { ...marker, sourceRevision: 'old' } : { statuses: [{ context: 'Vercel', state: 'success' }] }));
+  await assert.rejects(() => waitForVercel('commit', 'test-token', marker, { attempts: 1 }), /実配布内容/);
+} finally { globalThis.fetch = realFetch; }
+console.log('Vercel status欠落時の実配布確認・旧管理画面拒否のチェック成功');
+
+assert.equal(adminReleaseMatches({}, {}), false);
+assert.equal(adminReleaseMatches(null, marker), false);

@@ -25,6 +25,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @line-crm/shared --filter @line-crm/line-sdk --filter @line-crm/db --filter @line-harness/update-engine build
 
+      - name: Verify current main before production writes
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$(git ls-remote origin refs/heads/main | cut -f1)"
+
       - name: Run pending D1 migrations
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -94,6 +99,11 @@ jobs:
             ' dist/line_harness/wrangler.json > "$tmp" && mv "$tmp" dist/line_harness/wrangler.json
             echo "Patched admin CORS vars: ADMIN_ORIGIN=$ADMIN_ORIGIN ADMIN_ALLOW_CROSS_SITE=${ADMIN_ALLOW_CROSS_SITE:-true}"
           fi
+
+      - name: Verify current main immediately before deploy
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$(git ls-remote origin refs/heads/main | cut -f1)"
 
       - name: Deploy to Cloudflare Workers
         uses: cloudflare/wrangler-action@v3

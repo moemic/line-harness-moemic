@@ -214,6 +214,11 @@ async function build(name, source, settings, account, crons) {
     command('pnpm', ['--filter', 'worker', 'exec', 'tsc', '--noEmit', '--project', typeConfig], source);
     command('pnpm', ['test'], source);
   }
+  if (name === 'line') {
+    // GitHub status が作成されない配布でも、本番 alias の実内容を照合する。
+    const marker = { releaseTag: `v${JSON.parse(readFileSync(resolve(source, 'package.json'), 'utf8')).version}`, sourceRevision: git(['rev-parse', 'HEAD'], source) };
+    writeFileSync(resolve(source, 'apps/web/public/harness-release.json'), JSON.stringify(marker) + '\n');
+  }
   command('pnpm', ['--filter', 'web', 'build'], source, false, false, { NEXT_PUBLIC_API_URL: targets[name].url });
   let config, configPath;
   const workerDirectory = resolve(source, 'apps/worker');
@@ -230,15 +235,23 @@ async function build(name, source, settings, account, crons) {
   return configPath;
 }
 
-async function waitForVercel(sha, token) {
-  for (let attempt = 0; attempt < 60; attempt++) {
+export function adminReleaseMatches(actual, expected) {
+  return /^v\d+\.\d+\.\d+$/.test(expected?.releaseTag ?? '') && /^[0-9a-f]{40}$/.test(expected?.sourceRevision ?? '') && actual?.releaseTag === expected.releaseTag && actual?.sourceRevision === expected.sourceRevision;
+}
+
+export async function waitForVercel(sha, token, expected, { attempts = 60, pause = delay } = {}) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const response = await fetch(`${targets.line.admin}/harness-release.json?revision=${encodeURIComponent(expected.sourceRevision)}`, { signal: AbortSignal.timeout(15000), headers: { 'Cache-Control': 'no-cache' } });
+      if (response.ok && adminReleaseMatches(await response.json(), expected)) return;
+    } catch { /* 配布直後の一時的な通信失敗は次の照合へ進む。 */ }
     const statuses = await json(`https://api.github.com/repos/moemic/line-harness-moemic/commits/${sha}/status`, token);
     const status = statuses.statuses.find(s => /^Vercel$/i.test(s.context));
-    if (status?.state === 'success') return;
     if (status?.state === 'failure' || status?.state === 'error') throw new Error('Vercelの管理画面更新に失敗しました');
-    await delay(15000);
+    // status success だけで終えず、本番 alias の実配布 marker を照合する。
+    if (attempt + 1 < attempts) await pause(15000);
   }
-  throw new Error('Vercelの管理画面更新結果を確認できませんでした');
+  throw new Error('Vercelの管理画面の実配布内容を確認できませんでした');
 }
 
 async function run(mode) {
@@ -317,7 +330,7 @@ async function run(mode) {
         git(['add', '-A']);
         if (git(['status', '--porcelain'])) git(['commit', '-m', `chore: update LINE Harness to ${release.tag_name}`]);
         git(['push', 'origin', 'HEAD:main']);
-        await waitForVercel(git(['rev-parse', 'HEAD']), githubToken);
+        await waitForVercel(git(['rev-parse', 'HEAD']), githubToken, JSON.parse(readFileSync(resolve(root, 'apps/web/public/harness-release.json'), 'utf8')));
       }
       const admin = await fetch(target.admin, { signal: AbortSignal.timeout(15000) });
       if (!admin.ok) throw new Error(`管理画面の応答確認失敗: HTTP ${admin.status}`);
