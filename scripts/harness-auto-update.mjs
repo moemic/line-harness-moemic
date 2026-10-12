@@ -124,7 +124,7 @@ async function prepareSource(name, state, release, update) {
     git(['merge-base', '--is-ancestor', state.sourceSha, sourceSha], source);
     git(['merge', '--no-edit', sourceSha], source);
   }
-  return { source, sourceSha, names: migrationNames(git(['diff', '--name-status', state.sourceSha, sourceSha, '--', 'packages/db/migrations'], source)) };
+  return { source, sourceSha, names: migrationNames(git(['diff', '--name-status', state.sourceSha, sourceSha, '--', 'packages/db/migrations'], source)), sourcePatch: name === 'x' ? git(['diff', '--binary', sourceSha], source) + '\n' : null };
 }
 
 async function build(name, source, settings, account, crons) {
@@ -200,7 +200,7 @@ async function run(mode) {
     console.log(JSON.stringify({ harness: name, registeredRelease: state.releaseTag, latestRelease: release.tag_name, databaseVerified: true, workerCodeVerified: true, newerRelease: newer, mode }));
     if (mode === 'audit' || mode === 'check' || (!newer && mode !== 'dry-run')) continue;
     const schedules = await json(`${url}/schedules`, token);
-    const { source, sourceSha, names } = await prepareSource(name, state, release, newer);
+    const { source, sourceSha, names, sourcePatch } = await prepareSource(name, state, release, newer);
     const configPath = await build(name, source, settings, account, schedules.schedules.map(s => s.cron));
     const engine = await import(pathToFileURL(resolve(root, 'packages/update-engine/dist/index.mjs')).href);
     const migrations = new Map(names.map(file => [file, readFileSync(resolve(source, 'packages/db/migrations', file))]));
@@ -218,7 +218,7 @@ async function run(mode) {
       await publicHealth(target);
       if (name === 'x') {
         command('pnpm', ['exec', 'wrangler', 'pages', 'deploy', resolve(source, 'apps/web/out'), '--project-name', target.pages, '--branch', 'main', '--commit-hash', sourceSha], root, true);
-        writeFileSync(resolve(root, 'config/harness-updates/x-customizations.patch'), git(['diff', '--binary', sourceSha], source) + '\n');
+        writeFileSync(resolve(root, 'config/harness-updates/x-customizations.patch'), sourcePatch);
       } else {
         git(['add', '-A']);
         if (git(['status', '--porcelain'])) git(['commit', '-m', `chore: update LINE Harness to ${release.tag_name}`]);
