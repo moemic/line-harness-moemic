@@ -177,6 +177,7 @@ webhook.post('/webhook', async (c) => {
           c.env.LIFF_URL,
           c.env.IMAGES,
           proxyDispatch,
+          c.env.AI_BRIDGE_URL,
         );
       } catch (err) {
         console.error('Error handling webhook event:', err);
@@ -205,6 +206,7 @@ async function handleEvent(
   liffUrl?: string,
   r2?: R2Bucket,
   proxyDispatch?: HarnessProxyDispatch,
+  aiBridgeUrl?: string,
 ): Promise<void> {
   if (event.type === 'follow') {
     const userId =
@@ -597,7 +599,7 @@ async function handleEvent(
 
     // 自動返信チェック（このアカウントのルール + グローバルルールのみ）。
     // silent タイプは返信しないが matched=true になり unread / push を抑止する。
-    const { matched, replyTokenConsumed } = await matchAndReply(
+    const autoReply = await matchAndReply(
       db,
       lineClient,
       friend,
@@ -619,10 +621,35 @@ async function handleEvent(
           : undefined,
       },
     );
+    const matched = autoReply.matched;
+    let replyTokenConsumed = autoReply.replyTokenConsumed;
 
     // auto_replies にマッチしなかった = 自発メッセージ → unread にする
     if (!matched) {
       await upsertChatOnMessage(db, friend.id);
+      // 稼働中のAI連携を保持し、最新版の返信プロキシとアカウント別ログを使う。
+      if (aiBridgeUrl && !replyTokenConsumed) {
+        try {
+          const response = await fetch(`${aiBridgeUrl.replace(/\/$/, '')}/api/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: incomingText, lineUserId: userId, lineDisplayName: friend.display_name || '', replyToken: event.replyToken }),
+          });
+          if (response.ok) {
+            const body: unknown = await response.json();
+            if (typeof body === 'object' && body !== null && 'reply' in body && typeof body.reply === 'string') {
+              const messages = [{ type: 'text' as const, text: body.reply }];
+              if (workerUrl) await replyViaHarnessProxy(workerUrl, lineAccessToken, event.replyToken, messages, proxyDispatch);
+              else await lineClient.replyMessage(event.replyToken, messages);
+              replyTokenConsumed = true;
+              await db.prepare(`INSERT INTO messages_log (id, friend_id, direction, message_type, content, source, line_account_id, delivery_type, created_at)
+                VALUES (?, ?, 'outgoing', 'text', ?, 'ai_reply', ?, 'reply', ?)`).bind(crypto.randomUUID(), friend.id, body.reply, lineAccountId, jstNow()).run();
+            }
+          }
+        } catch (error) {
+          console.error('AI bridge error:', error);
+        }
+      }
     }
 
     // イベントバス発火: message_received

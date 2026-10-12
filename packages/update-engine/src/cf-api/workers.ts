@@ -240,7 +240,6 @@ export async function deployWorkerVersion(opts: {
         versions: [{ version_id: versionId, percentage: 100 }],
         annotations: {
           'workers/message': 'L Harness automatic update rollback',
-          'workers/triggered_by': 'line-harness-update-engine',
         },
       }),
     },

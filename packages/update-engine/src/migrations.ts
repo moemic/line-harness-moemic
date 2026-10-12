@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { containsDestructiveSchemaChanges, splitSqlStatements, stripSqlComments } from './sql-statements.js';
-export { containsDestructiveSchemaChanges, splitSqlStatements } from './sql-statements.js';
+export { containsDestructiveSchemaChanges, splitSqlStatements, stripSqlComments } from './sql-statements.js';
 import { applyLegacyMileageMigration, assertLegacyMileageSource, isLegacyMileageMigration, LEGACY_MILEAGE_CLAIMS_TABLE } from './legacy-mileage.js';
 import type { CfApiCreds } from './types.js';
 import { executeD1Query } from './cf-api/d1.js';

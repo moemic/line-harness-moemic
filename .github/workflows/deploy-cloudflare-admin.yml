@@ -2,15 +2,6 @@ name: Deploy Cloudflare Admin
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - 'apps/web/**'
-      - 'packages/shared/**'
-      - 'packages/update-engine/**'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - '.github/workflows/deploy-cloudflare-admin.yml'
 
 jobs:
   deploy:
