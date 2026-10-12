@@ -261,7 +261,7 @@ async function run(mode) {
     const target = targets[name];
     if (!target) throw new Error('対象Harnessが不正です');
     // LINE は Worker・管理画面の安全な復旧手順を検証するまで本番更新を保留する。
-    if (name === 'line' && mode === 'update') {
+    if (name === 'line' && mode === 'update' && !(process.env.GITHUB_EVENT_NAME === 'workflow_dispatch' && process.env.HARNESS_TARGET === 'line')) {
       console.log('LINE 本番更新は安全修正の検証完了まで保留中です');
       continue;
     }
@@ -297,6 +297,12 @@ async function run(mode) {
     console.log(JSON.stringify({ harness: name, sourceSha, migrations: names, buildVerified: true, deploymentConfigVerified: true }));
     if (mode === 'dry-run') continue;
     const pagesBefore = name === 'x' ? (await json(`${base}/pages/projects/${target.pages}`, token)).canonical_deployment.id : null;
+    const readLineCounts = async () => {
+      const result = await json(`${base}/d1/database/${target.database}/query`, token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sql: 'SELECT (SELECT COUNT(*) FROM friends) AS friends, (SELECT COUNT(*) FROM line_accounts) AS accounts, (SELECT COUNT(*) FROM messages_log) AS messages' }) });
+      return result[0].results[0];
+    };
+    const lineCountsBefore = name === 'line' ? await readLineCounts() : null;
+    if (lineCountsBefore) console.log(JSON.stringify({ lineCountsBefore }));
     const bookmark = command('pnpm', ['exec', 'wrangler', 'd1', 'time-travel', 'info', target.databaseName, '--json'], root, true, true);
     console.log(`D1復旧地点: ${bookmark.trim()}`);
     try {
@@ -315,6 +321,13 @@ async function run(mode) {
       }
       const admin = await fetch(target.admin, { signal: AbortSignal.timeout(15000) });
       if (!admin.ok) throw new Error(`管理画面の応答確認失敗: HTTP ${admin.status}`);
+      if (name === 'line') {
+        const lineCountsAfter = await readLineCounts();
+        console.log(JSON.stringify({ lineCountsBefore, lineCountsAfter }));
+        for (const key of ['friends', 'accounts', 'messages']) {
+          if (!Number.isInteger(lineCountsAfter[key]) || lineCountsAfter[key] < lineCountsBefore[key]) throw new Error(`LINE D1 件数が減少しています: ${key}`);
+        }
+      }
       const latest = await json(`${url}/deployments`, token);
       writeFileSync(statePath, JSON.stringify({ releaseTag: release.tag_name, sourceSha, workerVersion: latest.deployments[0].versions[0].version_id, codeHash: await workerHash(url, token) }, null, 2) + '\n');
       git(['add', 'config/harness-updates']);
