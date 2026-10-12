@@ -317,6 +317,8 @@ describe('Worker version snapshots', () => {
     expect(JSON.parse(init.body as string)).toMatchObject({
       strategy: 'percentage',
       versions: [{ version_id: 'version-123', percentage: 100 }],
+      annotations: { 'workers/message': 'L Harness automatic update rollback' },
     });
+    expect(JSON.parse(init.body as string).annotations).not.toHaveProperty('workers/triggered_by');
   });
 });

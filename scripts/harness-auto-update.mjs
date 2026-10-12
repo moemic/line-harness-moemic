@@ -110,11 +110,23 @@ async function workerHash(url, token) {
   if (!entries.length) throw new Error('Workerのコードが取得できません');
   return hash(entries.sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([name, digest]) => `${name}\0${digest}\n`).join(''));
 }
-async function publicHealth(target) {
-  const response = await fetch(`${target.url}/api/health`, { signal: AbortSignal.timeout(15000) });
-  if (target.worker === 'x-harness-worker') {
-    if (response.status !== 200 || (await response.json()).data?.status !== 'ok') throw new Error('X Workerのhealth確認に失敗しました');
-  } else if (![200, 401].includes(response.status)) throw new Error(`LINE Workerのhealth確認に失敗しました: ${response.status}`);
+export async function publicHealth(target, expectedVersion) {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      const response = await fetch(`${target.url}/api/health`, { signal: AbortSignal.timeout(15000) });
+      if (target.worker === 'line-harness' && !expectedVersion && response.status === 401) return;
+      if (response.status !== 200 || (await response.json()).data?.status !== 'ok') throw new Error('Workerのhealth確認に失敗しました');
+      if (target.worker === 'line-harness' && expectedVersion) {
+        const version = await fetch(`${target.url}/admin/version`, { signal: AbortSignal.timeout(15000) });
+        if (!version.ok || (await version.json()).version !== expectedVersion) throw new Error('LINE Workerの配置版番号が一致しません');
+      }
+      return;
+    } catch (error) {
+      if (attempt === 5) throw error;
+      // Cloudflareの配置直後は旧応答が残ることがあるため、反映を待って照合する。
+      await delay(5000);
+    }
+  }
 }
 
 async function prepareSource(name, state, release, update) {
@@ -242,7 +254,7 @@ async function run(mode) {
       await engine.applyD1Migrations({ creds, databaseId: target.database, names, migrations });
       command('pnpm', ['--filter', 'worker', 'exec', 'wrangler', 'deploy', '--config', configPath], source, true);
       assertPreservedSettings(settings, await json(`${url}/settings`, token), target);
-      await publicHealth(target);
+      await publicHealth(target, release.tag_name.replace(/^v/, ''));
       if (name === 'x') {
         command('pnpm', ['exec', 'wrangler', 'pages', 'deploy', resolve(source, 'apps/web/out'), '--project-name', target.pages, '--branch', 'main', '--commit-hash', sourceSha], root, true);
         writeFileSync(resolve(root, 'config/harness-updates/x-customizations.patch'), sourcePatch);

@@ -51,3 +51,27 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: 一度限りの既存WorkerとD1書き込み確認
+        if: inputs.mode == 'check' && inputs.harness == 'both'
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @line-harness/update-engine build
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { executeD1Query, getLatestWorkerDeployment, deployWorkerVersion } from './packages/update-engine/dist/index.mjs';
+          import { targets } from './scripts/harness-auto-update.mjs';
+          const creds = {accountId:process.env.CLOUDFLARE_ACCOUNT_ID,apiToken:process.env.CLOUDFLARE_API_TOKEN};
+          for (const [name,target] of Object.entries(targets)) {
+            const state = JSON.parse(readFileSync(`config/harness-updates/${name}.json`));
+            const before = await getLatestWorkerDeployment({creds,scriptName:target.worker});
+            if(before.versions.length!==1 || before.versions[0].version_id!==state.workerVersion || before.versions[0].percentage!==100) throw Error('配置変更を確認してください');
+            await executeD1Query({creds,databaseId:target.database,sql:'CREATE TABLE IF NOT EXISTS _line_harness_migrations (name TEXT PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)'});
+            await deployWorkerVersion({creds,scriptName:target.worker,versionId:state.workerVersion});
+            const after = await getLatestWorkerDeployment({creds,scriptName:target.worker});
+            if(after.versions[0].version_id!==state.workerVersion || after.versions[0].percentage!==100) throw Error('配置読み戻し失敗');
+            console.log(JSON.stringify({harness:name,existingVersionRetained:true,restorationApiVerified:true,migrationLedgerReady:true}));
+          }
+          JS
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
