@@ -2,16 +2,6 @@ name: Deploy Cloudflare Worker
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - 'apps/worker/**'
-      - 'apps/liff/**'
-      - 'packages/db/**'
-      - 'packages/shared/**'
-      - 'packages/line-sdk/**'
-      - 'packages/update-engine/**'
-      - '.github/workflows/deploy-cloudflare-worker.yml'
 
 jobs:
   deploy:

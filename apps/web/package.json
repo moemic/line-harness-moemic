@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev --port 3001",
-    "build": "next build",
+    "build": "pnpm --filter @line-crm/shared --filter @line-harness/update-engine build && next build",
     "start": "next start",
     "test": "vitest run --config vitest.config.ts"
   },

@@ -2,9 +2,22 @@ name: Harness automatic update
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'checkは確認、dry-runはビルドまで、updateは新しい安定版を反映'
+        type: choice
+        options: [check, dry-run, update]
+        default: check
+      harness:
+        description: '対象Harness'
+        type: choice
+        options: [both, line, x]
+        default: both
+  schedule:
+    - cron: '17 19 * * *'
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: harness-automatic-update
@@ -14,19 +27,26 @@ jobs:
   update:
     if: github.repository == 'moemic/line-harness-moemic'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - uses: pnpm/action-setup@v4
       - run: node scripts/harness-auto-update.test.mjs
-      - name: 既存Workerと管理画面の接続確認
-        run: node scripts/harness-auto-update.mjs
+      - name: 更新エンジンの準備
+        if: github.event_name == 'schedule' || inputs.mode != 'check'
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @line-harness/update-engine build
+      - name: 正式リリース確認と自動更新
+        run: node scripts/harness-auto-update.mjs "$UPDATE_MODE"
         env:
+          UPDATE_MODE: ${{ github.event_name == 'schedule' && 'update' || inputs.mode }}
+          HARNESS_TARGET: ${{ inputs.harness || 'both' }}
           GH_TOKEN: ${{ github.token }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}

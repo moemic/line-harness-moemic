@@ -1,0 +1,99 @@
+diff --git a/apps/worker/src/index.ts b/apps/worker/src/index.ts
+index 29a7ef6..9040612 100644
+--- a/apps/worker/src/index.ts
++++ b/apps/worker/src/index.ts
+@@ -107,9 +107,13 @@ app.get('/api/line-connections/:id', async (c) => {
+ app.post('/api/line-connections', async (c) => {
+   const body = await c.req.json<{ name: string; workerUrl: string; apiKey: string }>();
+   if (!body.name || !body.workerUrl || !body.apiKey) return c.json({ success: false, error: 'name, workerUrl, apiKey required' }, 400);
++  let workerUrl = body.workerUrl.replace(/\/$/, '');
++  if (!workerUrl.startsWith('http://') && !workerUrl.startsWith('https://')) {
++    workerUrl = 'https://' + workerUrl;
++  }
+   const id = crypto.randomUUID();
+-  await c.env.DB.prepare('INSERT INTO line_connections (id, name, worker_url, api_key, created_at) VALUES (?, ?, ?, ?, datetime(\'now\'))').bind(id, body.name, body.workerUrl.replace(/\/$/, ''), body.apiKey).run();
+-  return c.json({ success: true, data: { id, name: body.name, workerUrl: body.workerUrl } }, 201);
++  await c.env.DB.prepare('INSERT INTO line_connections (id, name, worker_url, api_key, created_at) VALUES (?, ?, ?, ?, datetime(\'now\'))').bind(id, body.name, workerUrl, body.apiKey).run();
++  return c.json({ success: true, data: { id, name: body.name, workerUrl } }, 201);
+ });
+ 
+ app.delete('/api/line-connections/:id', async (c) => {
+diff --git a/apps/worker/src/routes/posts.ts b/apps/worker/src/routes/posts.ts
+index 6ed34a6..06038c9 100644
+--- a/apps/worker/src/routes/posts.ts
++++ b/apps/worker/src/routes/posts.ts
+@@ -447,8 +447,17 @@ posts.post('/api/media/upload', async (c) => {
+   const xClient = buildXClient(account);
+   try {
+     const mediaData = await file.arrayBuffer();
+-    const mediaCategory = (formData.get('mediaCategory') as string | null) ?? 'tweet_image';
+-    const mediaId = await xClient.uploadMedia(mediaData, file.type, mediaCategory);
++    const rawCategory = formData.get('mediaCategory') as string | null;
++    const isVideo = (file.type && file.type.startsWith('video/')) || rawCategory === 'tweet_video' || rawCategory === 'amplify_video' || (typeof file.name === 'string' && (file.name.endsWith('.mp4') || file.name.endsWith('.mov')));
++    let mediaId: string;
++    if (isVideo) {
++      const category = rawCategory === 'amplify_video' ? 'amplify_video' : 'tweet_video';
++      const mediaType = file.type || 'video/mp4';
++      mediaId = await xClient.uploadVideo(mediaData, mediaType, category);
++    } else {
++      const category = rawCategory ?? 'tweet_image';
++      mediaId = await xClient.uploadMedia(mediaData, file.type, category);
++    }
+     c.executionCtx.waitUntil(incrementApiUsage(c.env.DB, account.id, 'upload_media'));
+     return c.json({ success: true, data: { mediaId } }, 201);
+   } catch (err: any) {
+diff --git a/apps/worker/src/routes/x-accounts.ts b/apps/worker/src/routes/x-accounts.ts
+index 8ab032e..13469eb 100644
+--- a/apps/worker/src/routes/x-accounts.ts
++++ b/apps/worker/src/routes/x-accounts.ts
+@@ -12,6 +12,9 @@ function serialize(a: any) {
+     username: a.username,
+     displayName: a.display_name,
+     isActive: !!a.is_active,
++    hasConsumerKey: !!a.consumer_key,
++    hasConsumerSecret: !!a.consumer_secret,
++    hasAccessTokenSecret: !!a.access_token_secret,
+     createdAt: a.created_at,
+   };
+ }
+diff --git a/packages/db/src/posts.ts b/packages/db/src/posts.ts
+index e84c6e7..ecd5b10 100644
+--- a/packages/db/src/posts.ts
++++ b/packages/db/src/posts.ts
+@@ -1,4 +1,4 @@
+-import { jstNow, toJstString } from './utils.js';
++import { jstNow, toJstString, normalizeJstDateString } from './utils.js';
+ 
+ export interface DbScheduledPost {
+   id: string;
+@@ -16,9 +16,10 @@ export interface DbScheduledPost {
+ export async function createScheduledPost(db: D1Database, xAccountId: string, text: string, scheduledAt: string, mediaIds?: string[], quoteTweetId?: string): Promise<DbScheduledPost> {
+   const id = crypto.randomUUID();
+   const now = jstNow();
++  const normalizedScheduledAt = normalizeJstDateString(scheduledAt);
+   const result = await db
+     .prepare('INSERT INTO scheduled_posts (id, x_account_id, text, media_ids, quote_tweet_id, scheduled_at, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *')
+-    .bind(id, xAccountId, text, mediaIds ? JSON.stringify(mediaIds) : null, quoteTweetId ?? null, scheduledAt, 'scheduled', now, now)
++    .bind(id, xAccountId, text, mediaIds ? JSON.stringify(mediaIds) : null, quoteTweetId ?? null, normalizedScheduledAt, 'scheduled', now, now)
+     .first<DbScheduledPost>();
+   return result!;
+ }
+diff --git a/packages/db/src/utils.ts b/packages/db/src/utils.ts
+index a1e17e0..9b4acd8 100644
+--- a/packages/db/src/utils.ts
++++ b/packages/db/src/utils.ts
+@@ -9,6 +9,14 @@ export function toJstString(date: Date): string {
+   return jst.toISOString().slice(0, -1) + '+09:00';
+ }
+ 
++export function normalizeJstDateString(dateStr: string): string {
++  const d = new Date(dateStr);
++  if (isNaN(d.getTime())) {
++    throw new Error(`Invalid date string: ${dateStr}`);
++  }
++  return toJstString(d);
++}
++
+ export function isTimeBefore(a: string, b: string): boolean {
+   return new Date(a).getTime() <= new Date(b).getTime();
+ }
