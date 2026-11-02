@@ -61,6 +61,29 @@ assert.ok(auto.indexOf("mode === 'update' && !lineUpdateAllowed()") < auto.index
 const scheduled = readFileSync(new URL('../.github/workflows/update-from-upstream.yml', import.meta.url), 'utf8');
 assert.match(scheduled, /cron: '17 21 \* \* \*'/);
 assert.match(scheduled, /cancel-in-progress: false/);
+// Exercise the actual workflow expression for both cron events and manual inputs.
+assert.deepEqual([...scheduled.matchAll(/cron: '([^']+)'/g)].map(match => match[1]), ['17 19 * * *', '17 21 * * *']);
+const targetExpression = scheduled.match(/HARNESS_TARGET: \$\{\{ (.+) \}\}/)[1];
+const selectTarget = new Function('github', 'inputs', `return (${targetExpression});`);
+const selectionCases = [
+  ['schedule', '17 19 * * *', undefined, 'x'],
+  ['schedule', '17 21 * * *', undefined, 'line'],
+  ['schedule', 'unexpected', undefined, 'invalid'],
+  ['schedule', '17 19 * * *', 'line', 'x'],
+  ['schedule', '17 21 * * *', 'x', 'line'],
+  ['workflow_dispatch', undefined, 'both', 'both'],
+  ['workflow_dispatch', undefined, 'line', 'line'],
+  ['workflow_dispatch', undefined, 'x', 'x'],
+  ['workflow_dispatch', '17 19 * * *', 'both', 'both'],
+  ['workflow_dispatch', undefined, undefined, 'both'],
+];
+for (const [eventName, schedule, harness, expected] of selectionCases) {
+  assert.equal(selectTarget({ event_name: eventName, event: { schedule } }, { harness }), expected);
+}
+assert.match(scheduled, /group: harness-automatic-update/);
+assert.match(scheduled, /UPDATE_MODE: \$\{\{ github.event_name == 'schedule' && 'update' \|\| inputs.mode \}\}/);
+console.log('schedule分離10ケース成功: X04:17 JST / LINE06:17 JST、未知schedule拒否、手動both/line/x保持');
+
 assert.match(scheduled, /inputs.harness \|\| 'both'/);
 const manual = readFileSync(new URL('../.github/workflows/deploy-cloudflare-worker.yml', import.meta.url), 'utf8');
 assert.match(manual, /set -euo pipefail\n\s+node scripts\/harness-update-window.mjs/);
