@@ -297,6 +297,7 @@ async function run(mode) {
     if (active.versions.length !== 1 || active.versions[0].percentage !== 100) throw new Error('段階的デプロイ中のWorkerは更新できません');
     assertActiveUpload(active, await json(`${url}/versions`, token));
     const currentHash = await workerHash(url, token);
+    console.log(JSON.stringify({ harness: name, actualWorkerVersion: active.versions[0].version_id, actualCodeHash: currentHash }));
     if (currentHash !== state.codeHash) throw new Error(`${target.worker}: 登録後にコードが変更されています。既存の修正を確認してください`);
     const release = await json(`https://api.github.com/repos/${target.repository}/releases/latest`, githubToken);
     if (release.prerelease || release.draft) throw new Error('正式な安定版リリースが必要です');
