@@ -1,3 +1,4 @@
+import { resolveLineWebhookConflicts } from './harness-merge.mjs';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -185,7 +186,18 @@ async function prepareSource(name, state, release, update) {
     git(['fetch', '--no-tags', `https://github.com/${target.repository}.git`, `refs/tags/${release.tag_name}`], source);
     sourceSha = git(['rev-parse', 'FETCH_HEAD^{commit}'], source);
     git(['merge-base', '--is-ancestor', state.sourceSha, sourceSha], source);
-    git(['merge', '--no-edit', sourceSha], source);
+    try {
+      git(['merge', '--no-edit', sourceSha], source);
+    } catch (error) {
+      const conflicts = git(['diff', '--name-only', '--diff-filter=U'], source).split('\n').filter(Boolean);
+      console.log(JSON.stringify({ mergeConflicts: conflicts }));
+      if (name !== 'line' || conflicts.length !== 1 || conflicts[0] !== 'apps/worker/src/routes/webhook.ts') throw error;
+      const path = resolve(source, conflicts[0]);
+      writeFileSync(path, resolveLineWebhookConflicts(readFileSync(path, 'utf8')));
+      git(['add', conflicts[0]], source);
+      git(['commit', '--no-edit'], source);
+      console.log('既知のwebhook引数競合をAI Bridge・gate環境の両方を保持して解消しました');
+    }
   }
   return { source, sourceSha, names: migrationNames(git(['diff', '--name-status', state.sourceSha, sourceSha, '--', 'packages/db/migrations'], source)), sourcePatch: name === 'x' ? git(['diff', '--binary', sourceSha], source) + '\n' : null };
 }
@@ -196,6 +208,8 @@ async function build(name, source, settings, account, crons) {
     command('pnpm', ['--filter', '@line-crm/shared', '--filter', '@line-crm/line-sdk', '--filter', '@line-crm/db', '--filter', '@line-harness/update-engine', 'build'], source);
     command('pnpm', ['--filter', 'worker', 'typecheck'], source);
     command('pnpm', ['--filter', 'worker', 'test'], source);
+    // 独立LIFFの依存も検証する。既存公開先が不明な別Pagesへは配布しない。
+    command('pnpm', ['--filter', 'liff', 'build'], source);
     const versionPath = resolve(source, 'apps/worker/src/_version.ts');
     const versionSource = readFileSync(versionPath, 'utf8');
     const packageVersion = JSON.parse(readFileSync(resolve(source, 'package.json'), 'utf8')).version;
@@ -303,6 +317,17 @@ async function run(mode) {
       }
     }
     console.log(JSON.stringify({ harness: name, sourceSha, migrations: names, buildVerified: true, deploymentConfigVerified: true }));
+    if (name === 'line' && migrations.size) {
+      const gateNames = new Set(settings.bindings.map(binding => binding.name));
+      if (['X_HARNESS_URL', 'X_HARNESS_GATE_SECRET', 'X_HARNESS_CONNECTION_ID'].every(key => gateNames.has(key))) throw new Error('X連携設定が存在します。LINE単体移行条件の確認が必要です');
+      const schema = await json(`${base}/d1/database/${target.database}/query`, token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sql: "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND type IN ('table','index','view','trigger') AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 WHEN 'view' THEN 2 ELSE 3 END, name" }) });
+      const schemaPath = resolve(runtime, 'line-staging-schema.json');
+      const sqlPath = resolve(runtime, 'line-staging-migrations.json');
+      writeFileSync(schemaPath, JSON.stringify(schema[0].results), { mode: 0o600 });
+      writeFileSync(sqlPath, JSON.stringify([...migrations.values()].map(sql => sql.toString('utf8'))), { mode: 0o600 });
+      command('python3', [resolve(root, 'scripts/harness-schema-stage.py'), schemaPath, sqlPath]);
+      console.log('LINE単体移行: X連携を有効化せず既存schemaの保持を検証しました');
+    }
     if (mode === 'dry-run') continue;
     const pagesBefore = name === 'x' ? (await json(`${base}/pages/projects/${target.pages}`, token)).canonical_deployment.id : null;
     const readLineCounts = async () => {

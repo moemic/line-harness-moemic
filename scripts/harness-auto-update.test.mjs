@@ -99,3 +99,5 @@ console.log('Vercel status欠落時の実配布確認・旧管理画面拒否の
 
 assert.equal(adminReleaseMatches({}, {}), false);
 assert.equal(adminReleaseMatches(null, marker), false);
+
+await import('./harness-merge.test.mjs');
