@@ -1,4 +1,4 @@
-import { resolveLineWebhookConflicts } from './harness-merge.mjs';
+import { mergeLineRelease } from './harness-merge.mjs';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -186,18 +186,8 @@ async function prepareSource(name, state, release, update) {
     git(['fetch', '--no-tags', `https://github.com/${target.repository}.git`, `refs/tags/${release.tag_name}`], source);
     sourceSha = git(['rev-parse', 'FETCH_HEAD^{commit}'], source);
     git(['merge-base', '--is-ancestor', state.sourceSha, sourceSha], source);
-    try {
-      git(['merge', '--no-edit', sourceSha], source);
-    } catch (error) {
-      const conflicts = git(['diff', '--name-only', '--diff-filter=U'], source).split('\n').filter(Boolean);
-      console.log(JSON.stringify({ mergeConflicts: conflicts }));
-      if (name !== 'line' || conflicts.length !== 1 || conflicts[0] !== 'apps/worker/src/routes/webhook.ts') throw error;
-      const path = resolve(source, conflicts[0]);
-      writeFileSync(path, resolveLineWebhookConflicts(readFileSync(path, 'utf8')));
-      git(['add', conflicts[0]], source);
-      git(['commit', '--no-edit'], source);
-      console.log('既知のwebhook引数競合をAI Bridge・gate環境の両方を保持して解消しました');
-    }
+    if (name === 'line') await mergeLineRelease(source, state.sourceSha, sourceSha);
+    else git(['merge', '--no-edit', sourceSha], source);
   }
   return { source, sourceSha, names: migrationNames(git(['diff', '--name-status', state.sourceSha, sourceSha, '--', 'packages/db/migrations'], source)), sourcePatch: name === 'x' ? git(['diff', '--binary', sourceSha], source) + '\n' : null };
 }
@@ -268,6 +258,18 @@ export async function waitForVercel(sha, token, expected, { attempts = 60, pause
   throw new Error('Vercelの管理画面の実配布内容を確認できませんでした');
 }
 
+async function verifyAppliedLineMigration(base, token, target, migrations) {
+  const file = '073_x_line_first_gates.sql';
+  if (!migrations.has(file)) throw new Error('今回の復旧用migrationと一致しません');
+  const query = async sql => (await json(`${base}/d1/database/${target.database}/query`, token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sql }) }))[0].results;
+  const rows = await query(`SELECT checksum FROM _line_harness_migrations WHERE name = '${file}'`);
+  const expected = `sha256:${hash(migrations.get(file))}`;
+  if (rows.length !== 1 || rows[0].checksum !== expected) throw new Error('073適用台帳のchecksumが一致しません');
+  const tables = await query("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('x_gate_campaigns','x_gate_entries','friend_external_ids','x_gate_inbox','x_gate_outbox','x_gate_reply_receipts','x_gate_notifications')");
+  if (tables.length !== 7) throw new Error('073の7テーブルを確認できません');
+  console.log(JSON.stringify({ lineMigration073Verified: true, checksumMatches: true, tables: tables.length }));
+}
+
 async function run(mode) {
   if (!['check', 'dry-run', 'update'].includes(mode)) throw new Error('実行モードが不正です');
   if (mode === 'update' && process.env.GITHUB_REF !== 'refs/heads/main') throw new Error('本番更新はmain上でのみ実行できます');
@@ -298,17 +300,22 @@ async function run(mode) {
     assertActiveUpload(active, await json(`${url}/versions`, token));
     const currentHash = await workerHash(url, token);
     console.log(JSON.stringify({ harness: name, actualWorkerVersion: active.versions[0].version_id, actualCodeHash: currentHash }));
-    if (currentHash !== state.codeHash) throw new Error(`${target.worker}: 登録後にコードが変更されています。既存の修正を確認してください`);
+    const recoveryPath = resolve(root, 'config/harness-updates/line-recovery.json');
+    const recovery = name === 'line' && existsSync(recoveryPath) ? JSON.parse(readFileSync(recoveryPath, 'utf8')) : null;
+    const recovering = name === 'line' && ['update', 'dry-run'].includes(mode) && process.env.GITHUB_EVENT_NAME === 'workflow_dispatch' && process.env.HARNESS_TARGET === 'line' && !recovery?.resolvedAt && recovery?.fromSourceSha === state.sourceSha && recovery?.workerVersion === active.versions[0].version_id && recovery?.codeHash === currentHash;
+    if (currentHash !== state.codeHash && !recovering) throw new Error(`${target.worker}: 登録後にコードが変更されています。既存の修正を確認してください`);
     const release = await json(`https://api.github.com/repos/${target.repository}/releases/latest`, githubToken);
     if (release.prerelease || release.draft) throw new Error('正式な安定版リリースが必要です');
     const newer = compareReleaseTags(release.tag_name, state.releaseTag) > 0;
-    if (newer && active.versions[0].version_id !== state.workerVersion) throw new Error('登録後の配置変更を確認してから更新してください');
-    await publicHealth(target);
+    if (recovering && release.tag_name !== recovery.releaseTag) throw new Error('復旧対象と最新正式版が異なります。新版を重ねず照合してください');
+    if (newer && active.versions[0].version_id !== state.workerVersion && !recovering) throw new Error('登録後の配置変更を確認してから更新してください');
+    await publicHealth(target, recovering ? recovery.releaseTag.replace(/^v/, '') : undefined);
     if (name === 'x') await json(`${base}/pages/projects/${target.pages}`, token);
     console.log(JSON.stringify({ harness: name, registeredRelease: state.releaseTag, latestRelease: release.tag_name, databaseVerified: true, workerCodeVerified: true, newerRelease: newer, mode }));
     if (mode === 'check' || (!newer && mode !== 'dry-run')) continue;
     const schedules = await json(`${url}/schedules`, token);
     const { source, sourceSha, names, sourcePatch } = await prepareSource(name, state, release, newer);
+    if (recovering && sourceSha !== recovery.sourceSha) throw new Error('公開済みソースと復旧対象tagのSHAが異なります');
     const configPath = await build(name, source, settings, account, schedules.schedules.map(s => s.cron));
     const engine = await import(pathToFileURL(resolve(root, 'packages/update-engine/dist/index.mjs')).href);
     const migrations = new Map(names.map(file => [file, readFileSync(resolve(source, 'packages/db/migrations', file))]));
@@ -318,7 +325,10 @@ async function run(mode) {
       }
     }
     console.log(JSON.stringify({ harness: name, sourceSha, migrations: names, buildVerified: true, deploymentConfigVerified: true }));
-    if (name === 'line' && migrations.size) {
+    if (name === 'line' && migrations.size && recovering) {
+      await verifyAppliedLineMigration(base, token, target, migrations);
+    }
+    if (name === 'line' && migrations.size && !recovering) {
       const gateNames = new Set(settings.bindings.map(binding => binding.name));
       if (['X_HARNESS_URL', 'X_HARNESS_GATE_SECRET', 'X_HARNESS_CONNECTION_ID'].every(key => gateNames.has(key))) throw new Error('X連携設定が存在します。LINE単体移行条件の確認が必要です');
       const schema = await json(`${base}/d1/database/${target.database}/query`, token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sql: "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND type IN ('table','index','view','trigger') AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 WHEN 'view' THEN 2 ELSE 3 END, name" }) });
@@ -340,8 +350,13 @@ async function run(mode) {
     const bookmark = command('pnpm', ['exec', 'wrangler', 'd1', 'time-travel', 'info', target.databaseName, '--json'], root, true, true);
     console.log(`D1復旧地点: ${bookmark.trim()}`);
     try {
-      await engine.applyD1Migrations({ creds, databaseId: target.database, names, migrations });
-      command('pnpm', ['--filter', 'worker', 'exec', 'wrangler', 'deploy', '--config', configPath], source, true);
+      if (!recovering) {
+        await engine.applyD1Migrations({ creds, databaseId: target.database, names, migrations });
+        if (name === 'line' && migrations.has('073_x_line_first_gates.sql')) await verifyAppliedLineMigration(base, token, target, migrations);
+        command('pnpm', ['--filter', 'worker', 'exec', 'wrangler', 'deploy', '--config', configPath], source, true);
+      } else {
+        console.log('既知の公開済みWorkerを照合済み。migrationとWorker再配布は行わず管理画面・記録を復旧します');
+      }
       assertPreservedSettings(settings, await json(`${url}/settings`, token), target);
       await publicHealth(target, release.tag_name.replace(/^v/, ''));
       if (name === 'x') {
@@ -364,6 +379,7 @@ async function run(mode) {
       }
       const latest = await json(`${url}/deployments`, token);
       writeFileSync(statePath, JSON.stringify({ releaseTag: release.tag_name, sourceSha, workerVersion: latest.deployments[0].versions[0].version_id, codeHash: await workerHash(url, token) }, null, 2) + '\n');
+      if (recovering) writeFileSync(recoveryPath, JSON.stringify({ ...recovery, resolvedAt: new Date().toISOString() }, null, 2) + '\n');
       git(['add', 'config/harness-updates']);
       git(['commit', '-m', `chore: record verified ${name} Harness ${release.tag_name}`]);
       git(['push', 'origin', 'HEAD:main']);
