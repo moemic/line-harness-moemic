@@ -22,6 +22,9 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      - name: Enforce LINE update hours (06:00–22:00 JST)
+        run: node scripts/harness-update-window.mjs
+
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @line-crm/shared --filter @line-crm/line-sdk --filter @line-crm/db --filter @line-harness/update-engine build
 
@@ -36,10 +39,13 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           D1_DATABASE_NAME: ${{ secrets.D1_DATABASE_NAME }}
         run: |
+          set -euo pipefail
+          node scripts/harness-update-window.mjs
           test -n "$CLOUDFLARE_API_TOKEN"
           test -n "$CLOUDFLARE_ACCOUNT_ID"
           test -n "$D1_DATABASE_NAME"
 
+          node scripts/harness-update-window.mjs
           npx wrangler d1 execute "$D1_DATABASE_NAME" --remote --command \
             "CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
 
@@ -50,7 +56,9 @@ jobs:
               | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));console.log(d[0]?.results?.length||0)")
             if [ "$applied" = "0" ]; then
               echo "Applying: $name"
+              node scripts/harness-update-window.mjs
               npx wrangler d1 execute "$D1_DATABASE_NAME" --remote --file="$f"
+              node scripts/harness-update-window.mjs
               npx wrangler d1 execute "$D1_DATABASE_NAME" --remote --command \
                 "INSERT INTO _migrations (name, applied_at) VALUES ('${name}', datetime('now'))"
             else
@@ -111,4 +119,5 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: apps/worker
+          preCommands: node ../../scripts/harness-update-window.mjs
           command: deploy --config dist/line_harness/wrangler.json --name ${{ vars.WORKER_NAME || 'your-worker-name' }}

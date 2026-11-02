@@ -1,0 +1,4 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "ignoreCommand": "test \"$(git log -1 --format=%s)\" = \"chore: protect LINE update hours [line-settings-only]\" || git -C \"$(git rev-parse --show-toplevel)\" diff --quiet HEAD^ HEAD -- . ':(exclude)config/harness-updates/**'"
+}

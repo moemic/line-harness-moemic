@@ -14,7 +14,7 @@ on:
         options: [both, line, x]
         default: both
   schedule:
-    - cron: '17 19 * * *'
+    - cron: '17 21 * * *' # 06:17 JST (UTC+9)
 
 permissions:
   contents: write
@@ -37,6 +37,7 @@ jobs:
         with:
           node-version: 22
       - uses: pnpm/action-setup@v4
+      - run: node scripts/harness-update-window.test.mjs
       - run: node scripts/harness-auto-update.test.mjs
       - name: 更新エンジンの準備
         if: github.event_name == 'schedule' || inputs.mode != 'check'

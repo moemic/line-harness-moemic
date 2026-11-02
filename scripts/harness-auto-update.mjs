@@ -1,3 +1,4 @@
+import { lineUpdateAllowed, assertLineUpdateWindow, guardedLineWrite } from './harness-update-window.mjs';
 import { mergeLineRelease } from './harness-merge.mjs';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -270,7 +271,7 @@ async function verifyAppliedLineMigration(base, token, target, migrations) {
   console.log(JSON.stringify({ lineMigration073Verified: true, checksumMatches: true, tables: tables.length }));
 }
 
-async function run(mode) {
+export async function run(mode) {
   if (!['check', 'dry-run', 'update'].includes(mode)) throw new Error('実行モードが不正です');
   if (mode === 'update' && process.env.GITHUB_REF !== 'refs/heads/main') throw new Error('本番更新はmain上でのみ実行できます');
   const { CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: token, GH_TOKEN: githubToken } = process.env;
@@ -286,7 +287,12 @@ async function run(mode) {
     process.env.GIT_AUTHOR_EMAIL = '15962725+moemic@users.noreply.github.com';
   }
   const selected = process.env.HARNESS_TARGET === 'both' || !process.env.HARNESS_TARGET ? Object.keys(targets) : [process.env.HARNESS_TARGET];
+  const checked = [];
   for (const name of selected) {
+    if (name === 'line' && mode === 'update' && !lineUpdateAllowed()) {
+      console.log('LINE更新保留: 22:00–06:00 JST。次の許可時間帯に再確認します');
+      continue;
+    }
     const target = targets[name];
     if (!target) throw new Error('対象Harnessが不正です');
     const statePath = resolve(root, `config/harness-updates/${name}.json`);
@@ -312,6 +318,7 @@ async function run(mode) {
     await publicHealth(target, recovering ? recovery.releaseTag.replace(/^v/, '') : undefined);
     if (name === 'x') await json(`${base}/pages/projects/${target.pages}`, token);
     console.log(JSON.stringify({ harness: name, registeredRelease: state.releaseTag, latestRelease: release.tag_name, databaseVerified: true, workerCodeVerified: true, newerRelease: newer, mode }));
+    checked.push(name);
     if (mode === 'check' || (!newer && mode !== 'dry-run')) continue;
     const schedules = await json(`${url}/schedules`, token);
     const { source, sourceSha, names, sourcePatch } = await prepareSource(name, state, release, newer);
@@ -351,8 +358,10 @@ async function run(mode) {
     console.log(`D1復旧地点: ${bookmark.trim()}`);
     try {
       if (!recovering) {
-        await engine.applyD1Migrations({ creds, databaseId: target.database, names, migrations });
+        assertLineUpdateWindow(name, mode, 'D1 migration');
+        await engine.applyD1Migrations({ creds, databaseId: target.database, names, migrations, execute: guardedLineWrite(name, 'D1 SQL', engine.executeD1Query) });
         if (name === 'line' && migrations.has('073_x_line_first_gates.sql')) await verifyAppliedLineMigration(base, token, target, migrations);
+        assertLineUpdateWindow(name, mode, 'Worker deploy');
         command('pnpm', ['--filter', 'worker', 'exec', 'wrangler', 'deploy', '--config', configPath], source, true);
       } else {
         console.log('既知の公開済みWorkerを照合済み。migrationとWorker再配布は行わず管理画面・記録を復旧します');
@@ -365,6 +374,7 @@ async function run(mode) {
       } else {
         git(['add', '-A']);
         if (git(['status', '--porcelain'])) git(['commit', '-m', `chore: update LINE Harness to ${release.tag_name}`]);
+        assertLineUpdateWindow(name, mode, 'admin source push');
         git(['push', 'origin', 'HEAD:main']);
         await waitForVercel(git(['rev-parse', 'HEAD']), githubToken, JSON.parse(readFileSync(resolve(root, 'apps/web/public/harness-release.json'), 'utf8')));
       }
@@ -382,6 +392,7 @@ async function run(mode) {
       if (recovering) writeFileSync(recoveryPath, JSON.stringify({ ...recovery, resolvedAt: new Date().toISOString() }, null, 2) + '\n');
       git(['add', 'config/harness-updates']);
       git(['commit', '-m', `chore: record verified ${name} Harness ${release.tag_name}`]);
+      assertLineUpdateWindow(name, mode, 'registration push');
       git(['push', 'origin', 'HEAD:main']);
       console.log(`${name}: ${release.tag_name} の自動更新と応答確認に成功しました`);
     } catch (error) {
@@ -396,11 +407,13 @@ async function run(mode) {
   if (mode === 'update') {
     const recordPath = resolve(root, 'config/harness-updates/last-check.json');
     const record = existsSync(recordPath) ? JSON.parse(readFileSync(recordPath, 'utf8')) : null;
-    if (checkRecordDue(record, Date.now())) {
+    if (checked.length && (!selected.includes('line') || lineUpdateAllowed()) && checkRecordDue(record, Date.now())) {
       // 公開repoの60日無活動によるschedule停止を防ぐため、正常照合結果を月1回保存する。
-      writeFileSync(recordPath, JSON.stringify({ checkedAt: new Date().toISOString(), targets: selected }, null, 2) + '\n');
+      writeFileSync(recordPath, JSON.stringify({ checkedAt: new Date().toISOString(), targets: checked }, null, 2) + '\n');
       git(['add', 'config/harness-updates/last-check.json']);
       git(['commit', '-m', 'chore: record verified Harness release check']);
+      // A shared repository push can trigger the LINE admin deployment.
+      if (selected.includes('line')) assertLineUpdateWindow('line', mode, 'check record push');
       git(['push', 'origin', 'HEAD:main']);
       console.log('正常確認の記録を保存しました');
     }
