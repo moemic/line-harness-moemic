@@ -37,7 +37,7 @@ for (const sql of ['DELETE FROM items', 'UPDATE items SET id = 1', 'INSERT OR RE
 
 const realFetch = globalThis.fetch;
 try {
-  globalThis.fetch = async url => new Response(JSON.stringify(String(url).endsWith('/admin/version') ? { version: '0.24.1' } : { data: { status: 'ok' } }), { status: 200 });
+  globalThis.fetch = async url => new Response(JSON.stringify(String(url).endsWith('/admin/version') ? { version: '0.24.1' } : { data: { status: 'ok', version: '0.5.1' } }), { status: 200 });
   await publicHealth(targets.line, '0.24.1');
   await publicHealth(targets.x, '0.5.1');
   globalThis.fetch = async () => new Response('', { status: 401 });

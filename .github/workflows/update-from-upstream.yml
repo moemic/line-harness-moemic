@@ -39,6 +39,7 @@ jobs:
           node-version: 22
       - uses: pnpm/action-setup@v4
       - run: node scripts/harness-update-window.test.mjs
+      - run: node scripts/harness-x-merge.test.mjs
       - run: node scripts/harness-auto-update.test.mjs
       - name: 更新エンジンの準備
         if: github.event_name == 'schedule' || inputs.mode != 'check'

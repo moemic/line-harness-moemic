@@ -1,7 +1,7 @@
 import { lineUpdateAllowed, assertLineUpdateWindow, guardedLineWrite } from './harness-update-window.mjs';
-import { mergeLineRelease } from './harness-merge.mjs';
+import { mergeLineRelease, mergeXRelease } from './harness-merge.mjs';
 import { pathToFileURL } from 'node:url';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, existsSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
@@ -30,11 +30,12 @@ export function compareReleaseTags(left, right) {
 
 export function preserveConfig(config, settings, target, account, crons) {
   validateDatabase(settings, target);
-  const supported = new Set(['d1', 'r2_bucket', 'kv_namespace', 'plain_text', 'secret_text', 'secret_key', 'assets']);
+  const supported = new Set(['d1', 'r2_bucket', 'kv_namespace', 'plain_text', 'secret_text', 'secret_key', 'assets', 'durable_object_namespace']);
   for (const binding of settings.bindings) if (!supported.has(binding.type)) throw new Error(`未対応の既存binding: ${binding.type}`);
   const result = structuredClone(config);
   const installedNames = new Set(settings.bindings.map(binding => binding.name));
-  const optionalExisting = target.worker === 'line-harness' ? new Set(['IMAGES', 'TENANT_SCHEDULER']) : new Set();
+  const optionalExisting = target.worker === 'line-harness' ? new Set(['IMAGES', 'TENANT_SCHEDULER']) : new Set(['GATE_CLAIMS']);
+  if (target.worker === 'x-harness-worker' && JSON.stringify(config.durable_objects?.bindings) !== JSON.stringify([{ name: 'GATE_CLAIMS', class_name: 'GateClaimCoordinator' }])) throw new Error('未確認のX Durable Object構成です');
   for (const binding of [...(config.r2_buckets ?? []), ...(config.kv_namespaces ?? []), ...(config.durable_objects?.bindings ?? [])]) {
     const name = binding.binding ?? binding.name;
     if (!installedNames.has(name) && !optionalExisting.has(name)) throw new Error(`新規binding ${name} の配置確認が必要です`);
@@ -54,8 +55,10 @@ export function preserveConfig(config, settings, target, account, crons) {
   result.triggers = { crons };
   if (settings.bindings.some(b => b.type === 'assets') && !result.assets) throw new Error('既存Worker Assetsを失う更新は実行できません');
   // 既存の配置構成を保持する。新規bindingが必要な版は設定を確認してから導入する。
-  delete result.durable_objects;
-  delete result.migrations;
+  if (target.worker === 'line-harness') {
+    delete result.durable_objects;
+    delete result.migrations;
+  } else if (JSON.stringify(result.migrations) !== JSON.stringify([{ tag: 'gate-claims-v1', new_sqlite_classes: ['GateClaimCoordinator'] }])) throw new Error('未確認のX Durable Object移行です');
   delete result.cache;
   return result;
 }
@@ -84,8 +87,27 @@ export function assertAdditiveStatement(statement) {
   if (!/^\s*(?:CREATE\s+(?:TABLE|(?:UNIQUE\s+)?INDEX)\b|ALTER\s+TABLE\s+(?:"[^"]+"|`[^`]+`|\[[^\]]+\]|\w+)\s+ADD\s+)/i.test(statement)) throw new Error('追加DDL以外のSQLは確認してから適用します');
 }
 
+export function assertXDataPreserved(before, after) {
+  const time = value => Date.parse(/(?:Z|[+-]\d\d:\d\d)$/.test(value) ? value : value.replace(' ', 'T') + '+09:00');
+  for (const table of Object.keys(before)) {
+    if (before[table].length !== after[table].length) throw new Error(`X既存件数が変わりました: ${table}`);
+    for (const row of before[table]) {
+      const actual = after[table].find(item => item.id === row.id);
+      for (const [key, value] of Object.entries(row)) {
+        const equal = table === 'scheduled_posts' && key === 'scheduled_at' ? Number.isFinite(time(value)) && time(value) === time(actual?.[key] ?? '') : actual?.[key] === value;
+        if (!equal) throw new Error(`X既存データが変わりました: ${table}.${key}`);
+      }
+    }
+  }
+}
+
 export function assertPreservedSettings(before, after, target) {
   validateDatabase(after, target);
+  if (target.worker === 'x-harness-worker' && !before.bindings.some(b => b.name === 'GATE_CLAIMS')) {
+    const added = after.bindings.filter(b => !before.bindings.some(old => old.name === b.name));
+    if (added.length !== 1 || added[0].name !== 'GATE_CLAIMS' || added[0].type !== 'durable_object_namespace' || added[0].class_name !== 'GateClaimCoordinator') throw new Error('X内部処理以外のbinding追加です');
+    after = { ...after, bindings: after.bindings.filter(b => b.name !== 'GATE_CLAIMS') };
+  }
   const fingerprint = settings => JSON.stringify(settings.bindings.map(binding => ({ name: binding.name, type: binding.type, id: binding.id ?? binding.database_id, bucket: binding.bucket_name, namespace: binding.namespace_id, text: binding.text })).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   if (fingerprint(before) !== fingerprint(after)) throw new Error('更新後のbinding・設定・Secret名が既存構成と一致しません');
   for (const flag of before.compatibility_flags ?? []) if (!after.compatibility_flags?.includes(flag)) throw new Error('既存のcompatibility flagが失われました');
@@ -134,13 +156,13 @@ async function json(url, token, options) {
   if (data.success === false) throw new Error('Cloudflare API確認失敗');
   return data.result ?? data;
 }
-async function workerHash(url, token) {
+export async function workerHash(url, token) {
   const form = await (await api(url, token)).formData();
   const entries = [];
   for (const [name, value] of form.entries()) {
     if (!/^[\w./-]+$/.test(name) || name.split('/').includes('..')) throw new Error('Worker module名が不正です');
-    // shortcut: 現行のJavaScript modulesを照合する。WASM等が追加されたらbinary対応を確認する。
-    if (!/\.(m?js)$/.test(name)) throw new Error('未対応のWorker module形式です');
+    // 新版の画像描画用WASM・フォントも文字列化せずバイト列で照合する。
+    if (!/\.(m?js|wasm|ttf)$/.test(name)) throw new Error('未対応のWorker module形式です');
     const bytes = typeof value === 'string' ? Buffer.from(value) : Buffer.from(await value.arrayBuffer());
     entries.push([name, hash(bytes)]);
   }
@@ -152,7 +174,9 @@ export async function publicHealth(target, expectedVersion) {
     try {
       const response = await fetch(`${target.url}/api/health`, { signal: AbortSignal.timeout(15000) });
       if (target.worker === 'line-harness' && !expectedVersion && response.status === 401) return;
-      if (response.status !== 200 || (await response.json()).data?.status !== 'ok') throw new Error('Workerのhealth確認に失敗しました');
+      const data = response.status === 200 ? (await response.json()).data : null;
+      if (data?.status !== 'ok') throw new Error('Workerのhealth確認に失敗しました');
+      if (target.worker === 'x-harness-worker' && expectedVersion && data.version !== expectedVersion) throw new Error('X Workerの配置版番号が一致しません');
       if (target.worker === 'line-harness' && expectedVersion) {
         const version = await fetch(`${target.url}/admin/version`, { signal: AbortSignal.timeout(15000) });
         if (!version.ok || (await version.json()).version !== expectedVersion) throw new Error('LINE Workerの配置版番号が一致しません');
@@ -188,7 +212,7 @@ async function prepareSource(name, state, release, update) {
     sourceSha = git(['rev-parse', 'FETCH_HEAD^{commit}'], source);
     git(['merge-base', '--is-ancestor', state.sourceSha, sourceSha], source);
     if (name === 'line') await mergeLineRelease(source, state.sourceSha, sourceSha);
-    else git(['merge', '--no-edit', sourceSha], source);
+    else await mergeXRelease(source, sourceSha);
   }
   return { source, sourceSha, names: migrationNames(git(['diff', '--name-status', state.sourceSha, sourceSha, '--', 'packages/db/migrations'], source)), sourcePatch: name === 'x' ? git(['diff', '--binary', sourceSha], source) + '\n' : null };
 }
@@ -323,13 +347,39 @@ export async function run(mode) {
     const schedules = await json(`${url}/schedules`, token);
     const { source, sourceSha, names, sourcePatch } = await prepareSource(name, state, release, newer);
     if (recovering && sourceSha !== recovery.sourceSha) throw new Error('公開済みソースと復旧対象tagのSHAが異なります');
+    if (name === 'x') {
+      const workerUrl = settings.bindings.find(b => b.name === 'WORKER_URL');
+      if (!workerUrl || workerUrl.type !== 'plain_text') throw new Error('X Worker URL設定を確認できません');
+      workerUrl.text = target.url;
+      const origin = settings.bindings.find(b => b.name === 'ADMIN_ORIGIN');
+      const origins = (origin?.text ?? '').split(',').map(value => value.trim()).filter(Boolean);
+      if (!origins.includes(target.admin)) origins.push(target.admin);
+      if (origin) origin.text = origins.join(',');
+      else settings.bindings.push({ name: 'ADMIN_ORIGIN', type: 'plain_text', text: origins.join(',') });
+    }
     const configPath = await build(name, source, settings, account, schedules.schedules.map(s => s.cron));
     const engine = await import(pathToFileURL(resolve(root, 'packages/update-engine/dist/index.mjs')).href);
     const migrations = new Map(names.map(file => [file, readFileSync(resolve(source, 'packages/db/migrations', file))]));
-    for (const sql of migrations.values()) {
+    const reviewedX = JSON.parse(readFileSync(resolve(root, 'config/harness-updates/x-reviewed-migrations.json'), 'utf8'));
+    for (const [file, sql] of migrations) {
+      if (name === 'x' && reviewedX[file] === hash(sql)) continue;
       for (const statement of engine.splitSqlStatements(sql.toString('utf8'))) {
         assertAdditiveStatement(engine.stripSqlComments(statement));
       }
+    }
+    const readXData = async () => {
+      const data = {};
+      for (const table of ['x_accounts', 'scheduled_posts', 'line_connections', 'engagement_gates']) {
+        data[table] = (await json(`${base}/d1/database/${target.database}/query`, token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sql: `SELECT * FROM ${table} ORDER BY id` }) }))[0].results;
+      }
+      return data;
+    };
+    const xDataBefore = name === 'x' ? await readXData() : null;
+    if (name === 'x' && migrations.size) {
+      const schema = (await json(`${base}/d1/database/${target.database}/query`, token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sql: "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 ELSE 2 END" }) }))[0].results;
+      const stage = resolve(runtime, 'x-staging.json');
+      writeFileSync(stage, JSON.stringify({ schema, data: xDataBefore, migrations: [...migrations.values()].map(sql => sql.toString('utf8')) }), { mode: 0o600 });
+      command('python3', [resolve(root, 'scripts/harness-x-schema-stage.py'), stage]);
     }
     console.log(JSON.stringify({ harness: name, sourceSha, migrations: names, buildVerified: true, deploymentConfigVerified: true }));
     if (name === 'line' && migrations.size && recovering) {
@@ -358,6 +408,11 @@ export async function run(mode) {
     console.log(`D1復旧地点: ${bookmark.trim()}`);
     try {
       if (!recovering) {
+        if (name === 'x' && !settings.bindings.some(b => b.name === 'ENCRYPTION_KEY')) {
+          // 既存のキーは決して置換しない。新規暗号化書込みに先立って一度だけ作る。
+          await json(`${url}/secrets`, token, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'ENCRYPTION_KEY', type: 'secret_text', text: randomBytes(32).toString('base64') }) });
+          settings.bindings.push({ name: 'ENCRYPTION_KEY', type: 'secret_text' });
+        }
         assertLineUpdateWindow(name, mode, 'D1 migration');
         await engine.applyD1Migrations({ creds, databaseId: target.database, names, migrations, execute: guardedLineWrite(name, 'D1 SQL', engine.executeD1Query) });
         if (name === 'line' && migrations.has('073_x_line_first_gates.sql')) await verifyAppliedLineMigration(base, token, target, migrations);
@@ -367,6 +422,7 @@ export async function run(mode) {
         console.log('既知の公開済みWorkerを照合済み。migrationとWorker再配布は行わず管理画面・記録を復旧します');
       }
       assertPreservedSettings(settings, await json(`${url}/settings`, token), target);
+      if (name === 'x') assertXDataPreserved(xDataBefore, await readXData());
       await publicHealth(target, release.tag_name.replace(/^v/, ''));
       if (name === 'x') {
         command('pnpm', ['exec', 'wrangler', 'pages', 'deploy', resolve(source, 'apps/web/out'), '--project-name', target.pages, '--branch', 'main', '--commit-hash', sourceSha], root, true);
