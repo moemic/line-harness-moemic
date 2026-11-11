@@ -44,14 +44,14 @@ migrated.scheduled_posts[0].scheduled_at = '2026-11-12T11:00:00+09:00';
 assert.throws(() => assertXDataPreserved(data, migrated));
 console.log('既存D1/Secret/cron保持・既知内部構成追加・予約時刻/認証情報保持の回帰試験成功');
 
-const { workerHash } = await import('./harness-auto-update.mjs');
+const { workerHash, hashWorkerMultipart } = await import('./harness-auto-update.mjs');
 const realFetch = globalThis.fetch;
 try {
   const form = new FormData();
   form.append('index.js', new Blob(['export default {}']));
   form.append('layout.wasm', new Blob([new Uint8Array([0, 255, 1, 128])]));
   form.append('font.ttf', new Blob([new Uint8Array([255, 0, 128])]));
-  globalThis.fetch = async () => ({ ok: true, formData: async () => form });
+  globalThis.fetch = async () => new Response(form);
   const first = await workerHash('https://api.example/worker', 'synthetic');
   form.set('layout.wasm', new Blob([new Uint8Array([0, 254, 1, 128])]));
   assert.notEqual(await workerHash('https://api.example/worker', 'synthetic'), first);
@@ -59,3 +59,10 @@ try {
   await assert.rejects(() => workerHash('https://api.example/worker', 'synthetic'), /module名/);
 } finally { globalThis.fetch = realFetch; }
 console.log('WASM/フォントのバイト照合・変更検出・不正module名拒否の回帰試験成功');
+
+// filenameなしのbinary partもUTF-8文字列へ変換しない。
+const raw = Buffer.concat([Buffer.from('--fixture\r\nContent-Disposition: form-data; name="index.wasm"\r\n\r\n'), Buffer.from([0,255,128]), Buffer.from('\r\n--fixture--\r\n')]);
+const { createHash } = await import('node:crypto');
+const digest = value => createHash('sha256').update(value).digest('hex');
+assert.equal(hashWorkerMultipart(raw, 'multipart/form-data; boundary=fixture'), digest(`index.wasm\0${digest(Buffer.from([0,255,128]))}\n`));
+assert.throws(() => hashWorkerMultipart(raw, 'multipart/form-data'), /boundary/);

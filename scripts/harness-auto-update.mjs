@@ -156,18 +156,32 @@ async function json(url, token, options) {
   if (data.success === false) throw new Error('Cloudflare API確認失敗');
   return data.result ?? data;
 }
-export async function workerHash(url, token) {
-  const form = await (await api(url, token)).formData();
+export function hashWorkerMultipart(bytes, contentType) {
+  const boundary = /boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(contentType);
+  if (!boundary) throw new Error('Worker multipart boundaryがありません');
+  const delimiter = Buffer.from(`\r\n--${boundary[1] ?? boundary[2]}`);
   const entries = [];
-  for (const [name, value] of form.entries()) {
+  let start = bytes.indexOf(Buffer.from('\r\n')) + 2;
+  while (start < bytes.length) {
+    const headerEnd = bytes.indexOf(Buffer.from('\r\n\r\n'), start);
+    const end = bytes.indexOf(delimiter, headerEnd + 4);
+    if (headerEnd < start || end < 0) throw new Error('Worker multipartが不完全です');
+    const name = /\bname="([^"]+)"/i.exec(bytes.subarray(start, headerEnd).toString('utf8'))?.[1];
+    if (!name) throw new Error('Worker module名がありません');
     if (!/^[\w./-]+$/.test(name) || name.split('/').includes('..')) throw new Error('Worker module名が不正です');
     // 新版の画像描画用WASM・フォントも文字列化せずバイト列で照合する。
-    if (!/\.(m?js|wasm|ttf)$/.test(name)) throw new Error('未対応のWorker module形式です');
-    const bytes = typeof value === 'string' ? Buffer.from(value) : Buffer.from(await value.arrayBuffer());
-    entries.push([name, hash(bytes)]);
+    if (!/\.(m?js(?:\.map)?|wasm|ttf)$/.test(name)) throw new Error('未対応のWorker module形式です');
+    entries.push([name, hash(bytes.subarray(headerEnd + 4, end))]);
+    start = end + delimiter.length;
+    if (bytes.subarray(start, start + 2).toString() === '--') break;
+    start += 2;
   }
   if (!entries.length) throw new Error('Workerのコードが取得できません');
   return hash(entries.sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([name, digest]) => `${name}\0${digest}\n`).join(''));
+}
+export async function workerHash(url, token) {
+  const response = await api(url, token);
+  return hashWorkerMultipart(Buffer.from(await response.arrayBuffer()), response.headers.get('Content-Type') ?? '');
 }
 export async function publicHealth(target, expectedVersion) {
   for (let attempt = 0; attempt < 6; attempt++) {
@@ -330,9 +344,9 @@ export async function run(mode) {
     assertActiveUpload(active, await json(`${url}/versions`, token));
     const currentHash = await workerHash(url, token);
     console.log(JSON.stringify({ harness: name, actualWorkerVersion: active.versions[0].version_id, actualCodeHash: currentHash }));
-    const recoveryPath = resolve(root, 'config/harness-updates/line-recovery.json');
-    const recovery = name === 'line' && existsSync(recoveryPath) ? JSON.parse(readFileSync(recoveryPath, 'utf8')) : null;
-    const recovering = name === 'line' && ['update', 'dry-run'].includes(mode) && process.env.GITHUB_EVENT_NAME === 'workflow_dispatch' && process.env.HARNESS_TARGET === 'line' && !recovery?.resolvedAt && recovery?.fromSourceSha === state.sourceSha && recovery?.workerVersion === active.versions[0].version_id && recovery?.codeHash === currentHash;
+    const recoveryPath = resolve(root, `config/harness-updates/${name}-recovery.json`);
+    const recovery = existsSync(recoveryPath) ? JSON.parse(readFileSync(recoveryPath, 'utf8')) : null;
+    const recovering = ['update', 'dry-run'].includes(mode) && process.env.GITHUB_EVENT_NAME === 'workflow_dispatch' && process.env.HARNESS_TARGET === name && !recovery?.resolvedAt && recovery?.fromSourceSha === state.sourceSha && recovery?.workerVersion === active.versions[0].version_id && recovery?.codeHash === currentHash;
     if (currentHash !== state.codeHash && !recovering) throw new Error(`${target.worker}: 登録後にコードが変更されています。既存の修正を確認してください`);
     const release = await json(`https://api.github.com/repos/${target.repository}/releases/latest`, githubToken);
     if (release.prerelease || release.draft) throw new Error('正式な安定版リリースが必要です');
@@ -375,11 +389,15 @@ export async function run(mode) {
       return data;
     };
     const xDataBefore = name === 'x' ? await readXData() : null;
-    if (name === 'x' && migrations.size) {
+    if (name === 'x' && migrations.size && !recovering) {
       const schema = (await json(`${base}/d1/database/${target.database}/query`, token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sql: "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 ELSE 2 END" }) }))[0].results;
       const stage = resolve(runtime, 'x-staging.json');
       writeFileSync(stage, JSON.stringify({ schema, data: xDataBefore, migrations: [...migrations.values()].map(sql => sql.toString('utf8')) }), { mode: 0o600 });
       command('python3', [resolve(root, 'scripts/harness-x-schema-stage.py'), stage]);
+    }
+    if (name === 'x' && recovering) {
+      const rows = (await json(`${base}/d1/database/${target.database}/query`, token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sql: 'SELECT name, checksum FROM _line_harness_migrations' }) }))[0].results;
+      for (const [file, sql] of migrations) if (!rows.some(row => row.name === file && row.checksum === `sha256:${hash(sql)}`)) throw new Error('X移行台帳と公開済み版のchecksumが一致しません');
     }
     console.log(JSON.stringify({ harness: name, sourceSha, migrations: names, buildVerified: true, deploymentConfigVerified: true }));
     if (name === 'line' && migrations.size && recovering) {
@@ -425,7 +443,7 @@ export async function run(mode) {
       if (name === 'x') assertXDataPreserved(xDataBefore, await readXData());
       await publicHealth(target, release.tag_name.replace(/^v/, ''));
       if (name === 'x') {
-        command('pnpm', ['exec', 'wrangler', 'pages', 'deploy', resolve(source, 'apps/web/out'), '--project-name', target.pages, '--branch', 'main', '--commit-hash', sourceSha], root, true);
+        command('pnpm', ['--filter', 'worker', 'exec', 'wrangler', 'pages', 'deploy', resolve(source, 'apps/web/out'), '--project-name', target.pages, '--branch', 'main', '--commit-hash', sourceSha], source, true);
         writeFileSync(resolve(root, 'config/harness-updates/x-customizations.patch'), sourcePatch);
       } else {
         git(['add', '-A']);
@@ -452,6 +470,7 @@ export async function run(mode) {
       git(['push', 'origin', 'HEAD:main']);
       console.log(`${name}: ${release.tag_name} の自動更新と応答確認に成功しました`);
     } catch (error) {
+      if (name === 'x') throw new Error(`X更新未完了。暗号化・Durable Object移行後の旧Worker単独rollbackは行いません。稼働版を保持して復旧してください: ${error.message}`, { cause: error });
       await recoverUpdateFailure(name, error, async () => {
         await engine.deployWorkerVersion({ creds, scriptName: target.worker, versionId: active.versions[0].version_id });
         if (pagesBefore && (await json(`${base}/pages/projects/${target.pages}`, token)).canonical_deployment.id !== pagesBefore) {
