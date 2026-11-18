@@ -52,6 +52,22 @@ export function resolveLineWebhookConflicts(source) {
   return result;
 }
 
+export function resolveLineConflicts(source, path) {
+  if (path === 'apps/worker/src/routes/webhook.ts') return resolveLineWebhookConflicts(source);
+  const additions = {
+    '.gitignore': ['.harness-runtime/', '.pnpm-store/\n__pycache__/'],
+    'apps/worker/src/routes/webhook.test.ts': ['applyMileageRulesForEvent: vi.fn().mockResolvedValue([]),', 'recordSignatureFailure: vi.fn().mockResolvedValue(undefined),\n  recordSignatureSuccess: vi.fn().mockResolvedValue(undefined),'],
+  };
+  let count = 0;
+  const result = source.replace(/^<<<<<<< .*\n([\s\S]*?)^=======\n([\s\S]*?)^>>>>>>> .*\n?/gm, (_all, ours, theirs) => {
+    if (!additions[path] || ours.trim() !== additions[path][0] || theirs.trim() !== additions[path][1]) throw new Error(`未知のLINE競合です: ${path}`);
+    count++;
+    return ours + theirs;
+  });
+  if (count !== 1 || /^(?:<<<<<<<|=======|>>>>>>>)/m.test(result)) throw new Error(`既知のLINE競合と一致しません: ${path}`);
+  return result;
+}
+
 // 自前CIを保持し、GitHub Appにworkflow権限を要求しないソース更新を作る。
 // 公式baseを明示するため、上流履歴をparentへ追加しなくても次版を三者比較できる。
 export async function mergeLineRelease(directory, baseline, incoming) {
@@ -69,15 +85,16 @@ export async function mergeLineRelease(directory, baseline, incoming) {
     output = String(error.stdout).trim();
     conflicts = [...new Set([...output.matchAll(/^\d+ [0-9a-f]+ [123]\t(.+)$/gm)].map(match => match[1]))];
     console.log(JSON.stringify({ mergeConflicts: conflicts }));
-    if (conflicts.length !== 1 || conflicts[0] !== 'apps/worker/src/routes/webhook.ts') throw new Error('未知のソース競合です。取り込みを停止します');
+    if (!conflicts.length || conflicts.some(path => !['.gitignore', 'apps/worker/src/routes/webhook.test.ts', 'apps/worker/src/routes/webhook.ts'].includes(path))) throw new Error('未知のソース競合です。取り込みを停止します');
   }
   const tree = output.split('\n')[0];
   if (!/^[0-9a-f]{40}$/.test(tree)) throw new Error('マージtreeを確認できません');
+  // 全競合を検証してからworktreeへ反映し、未知の内容では保存状態を変えない。
+  const resolved = conflicts.map(path => [path, resolveLineConflicts(git(['show', `${tree}:${path}`]) + '\n', path)]);
   git(['read-tree', '--reset', '-u', tree]);
-  if (conflicts.length) {
-    const path = resolve(directory, conflicts[0]);
-    writeFileSync(path, resolveLineWebhookConflicts(readFileSync(path, 'utf8')));
-    git(['add', conflicts[0]]);
+  for (const [path, text] of resolved) {
+    writeFileSync(resolve(directory, path), text);
+    git(['add', path]);
   }
   // アプリ更新で上流の公開/権限/CI設定を勝手に導入しない。
   git(['restore', `--source=${before}`, '--staged', '--worktree', '--', '.github']);
