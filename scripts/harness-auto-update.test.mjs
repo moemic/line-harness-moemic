@@ -101,3 +101,32 @@ assert.equal(adminReleaseMatches({}, {}), false);
 assert.equal(adminReleaseMatches(null, marker), false);
 
 await import('./harness-merge.test.mjs');
+
+const { migrateLineStaffKeys } = await import('./harness-auto-update.mjs');
+const { createHash } = await import('node:crypto');
+const staffRows = [
+  { id: 'active', api_key: 'synthetic-active-key', api_key_hash: null, role: 'owner', api_scopes: null, is_active: 1 },
+  { id: 'inactive', api_key: 'synthetic-inactive-key', api_key_hash: null, role: 'staff', api_scopes: '["messages:read"]', is_active: 0 },
+];
+const originalStaff = structuredClone(staffRows);
+const executeStaff = async (sql, params) => {
+  if (sql.startsWith('SELECT')) {
+    assert.ok(!sql.includes('is_active'));
+    return { result: [{ results: structuredClone(staffRows.filter(row => !row.api_key.startsWith('hashed:')).slice(0, 25)) }] };
+  }
+  const row = staffRows.find(item => item.id === params[3]);
+  assert.equal(row.api_key, params[4]);
+  assert.equal(row.api_key_hash, params[5]);
+  [row.api_key_hash, row.api_key_last4, row.api_key] = params;
+  return { result: [{ meta: { changes: 1 } }] };
+};
+assert.equal(await migrateLineStaffKeys(executeStaff), 2);
+for (let i = 0; i < staffRows.length; i++) {
+  assert.equal(staffRows[i].api_key, `hashed:${originalStaff[i].id}`);
+  assert.equal(staffRows[i].api_key_hash, createHash('sha256').update(originalStaff[i].api_key).digest('hex'));
+  for (const field of ['role', 'api_scopes', 'is_active']) assert.equal(staffRows[i][field], originalStaff[i][field]);
+}
+assert.equal(await migrateLineStaffKeys(executeStaff), 0);
+await assert.rejects(() => migrateLineStaffKeys(async sql => sql.startsWith('SELECT') ? { result: [{ results: [originalStaff[0]] }] } : { result: [{ meta: { changes: 0 } }] }), /並行変更/);
+await assert.rejects(() => migrateLineStaffKeys(async () => ({ result: [] })), /読戻し/);
+console.log('074認証移行: 元キーdigest・非稼働を含む全スタッフ・権限保持・再実行・CAS競合停止の回帰成功');

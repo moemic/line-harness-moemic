@@ -127,6 +127,24 @@ const root = process.cwd();
 const runtime = resolve(root, '.harness-runtime');
 const secretKeys = ['CLOUDFLARE_API_TOKEN', 'GH_TOKEN', 'VERCEL_TOKEN', 'VERCEL_ORG_ID', 'VERCEL_PROJECT_ID'];
 const hash = value => createHash('sha256').update(value).digest('hex');
+
+// 074の公式仕様どおり、元キーを変えず保存形式だけをCASで移行する。
+export async function migrateLineStaffKeys(execute) {
+  let total = 0;
+  for (let batch = 0; batch < 1000; batch++) {
+    const data = await execute("SELECT id, api_key, api_key_hash FROM staff_members INDEXED BY idx_staff_members_plaintext WHERE api_key NOT GLOB 'hashed:*' ORDER BY id LIMIT 25");
+    const rows = data.result?.[0]?.results;
+    if (!Array.isArray(rows)) throw new Error('スタッフ認証移行の読戻しに失敗しました');
+    if (!rows.length) return total;
+    for (const row of rows) {
+      if (typeof row.api_key !== 'string' || !row.api_key || row.api_key.startsWith('hashed:')) throw new Error('スタッフ認証移行の入力が不正です');
+      const result = await execute('UPDATE staff_members SET api_key_hash = ?, api_key_last4 = ?, api_key = ? WHERE id = ? AND api_key = ? AND api_key_hash IS ?', [hash(row.api_key), row.api_key.slice(-4), `hashed:${row.id}`, row.id, row.api_key, row.api_key_hash ?? null]);
+      if (result.result?.[0]?.meta?.changes !== 1) throw new Error('スタッフ認証が並行変更されました。上書きせず停止します');
+      total++;
+    }
+  }
+  throw new Error('スタッフ認証移行のバッチ上限に達しました');
+}
 function command(program, args, cwd = root, authenticated = false, capture = false, extraEnv = {}) {
   const env = { ...process.env, ...extraEnv, WRANGLER_SEND_METRICS: 'false' };
   if (!authenticated) for (const key of secretKeys) delete env[key];
@@ -442,6 +460,11 @@ export async function run(mode) {
       assertPreservedSettings(settings, await json(`${url}/settings`, token), target);
       if (name === 'x') assertXDataPreserved(xDataBefore, await readXData());
       await publicHealth(target, release.tag_name.replace(/^v/, ''));
+      if (name === 'line' && migrations.has('074_security_hardening.sql')) {
+        const execute = guardedLineWrite(name, 'staff key migration', engine.executeD1Query);
+        const migrated = await migrateLineStaffKeys((sql, params) => execute({ creds, databaseId: target.database, sql, params }));
+        console.log(JSON.stringify({ staffCredentialMigrationVerified: true, migrated }));
+      }
       if (name === 'x') {
         command('pnpm', ['--filter', 'worker', 'exec', 'wrangler', 'pages', 'deploy', resolve(source, 'apps/web/out'), '--project-name', target.pages, '--branch', 'main', '--commit-hash', sourceSha], source, true);
         writeFileSync(resolve(root, 'config/harness-updates/x-customizations.patch'), sourcePatch);

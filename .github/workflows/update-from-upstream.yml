@@ -41,6 +41,7 @@ jobs:
       - run: node scripts/harness-update-window.test.mjs
       - run: node scripts/harness-x-merge.test.mjs
       - run: node scripts/harness-auto-update.test.mjs
+      - run: python3 scripts/harness-schema-stage.test.py
       - name: 更新エンジンの準備
         if: github.event_name == 'schedule' || inputs.mode != 'check'
         run: |
