@@ -128,6 +128,12 @@ for (let i = 0; i < staffRows.length; i++) {
   for (const field of ['role', 'api_scopes', 'is_active']) assert.equal(staffRows[i][field], originalStaff[i][field]);
 }
 assert.equal(await migrateLineStaffKeys(executeStaff), 0);
-await assert.rejects(() => migrateLineStaffKeys(async sql => sql.startsWith('SELECT') ? { result: [{ results: [originalStaff[0]] }] } : { result: [{ meta: { changes: 0 } }] }), /並行変更/);
+let concurrentPending = true;
+assert.equal(await migrateLineStaffKeys(async sql => {
+  if (sql.startsWith('SELECT')) return { result: [{ results: concurrentPending ? [originalStaff[0]] : [] }] };
+  concurrentPending = false;
+  return { result: [{ meta: { changes: 0 } }] };
+}), 0);
+await assert.rejects(() => migrateLineStaffKeys(async sql => sql.startsWith('SELECT') ? { result: [{ results: [originalStaff[0]] }] } : { result: [{ meta: { changes: 0 } }] }), /バッチ上限/);
 await assert.rejects(() => migrateLineStaffKeys(async () => ({ result: [] })), /読戻し/);
-console.log('074認証移行: 元キーdigest・非稼働を含む全スタッフ・権限保持・再実行・CAS競合停止の回帰成功');
+console.log('074認証移行: 元キーdigest・全スタッフ・権限保持・再実行・CAS並行移行と上限の回帰成功');

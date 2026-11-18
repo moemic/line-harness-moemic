@@ -139,8 +139,10 @@ export async function migrateLineStaffKeys(execute) {
     for (const row of rows) {
       if (typeof row.api_key !== 'string' || !row.api_key || row.api_key.startsWith('hashed:')) throw new Error('スタッフ認証移行の入力が不正です');
       const result = await execute('UPDATE staff_members SET api_key_hash = ?, api_key_last4 = ?, api_key = ? WHERE id = ? AND api_key = ? AND api_key_hash IS ?', [hash(row.api_key), row.api_key.slice(-4), `hashed:${row.id}`, row.id, row.api_key, row.api_key_hash ?? null]);
-      if (result.result?.[0]?.meta?.changes !== 1) throw new Error('スタッフ認証が並行変更されました。上書きせず停止します');
-      total++;
+      const changes = result.result?.[0]?.meta?.changes;
+      if (changes !== 0 && changes !== 1) throw new Error('スタッフ認証移行の書込み結果が不正です');
+      // 認証要求が先に同じキーを移行した場合も、上書きせず次の待機行確認へ進む。
+      total += changes;
     }
   }
   throw new Error('スタッフ認証移行のバッチ上限に達しました');
