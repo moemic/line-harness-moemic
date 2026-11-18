@@ -112,6 +112,7 @@ const originalStaff = structuredClone(staffRows);
 const executeStaff = async (sql, params) => {
   if (sql.startsWith('SELECT')) {
     assert.ok(!sql.includes('is_active'));
+    assert.ok(sql.includes('INDEXED BY idx_staff_members_plaintext') && sql.endsWith('LIMIT 25'));
     return { result: [{ results: structuredClone(staffRows.filter(row => !row.api_key.startsWith('hashed:')).slice(0, 25)) }] };
   }
   const row = staffRows.find(item => item.id === params[3]);

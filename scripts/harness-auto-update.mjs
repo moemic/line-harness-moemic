@@ -252,6 +252,7 @@ async function prepareSource(name, state, release, update) {
 async function build(name, source, settings, account, crons) {
   command('pnpm', ['install', '--frozen-lockfile'], source);
   if (name === 'line') {
+    if (JSON.parse(readFileSync(resolve(source, 'package.json'), 'utf8')).scripts?.['check:cost']) command('pnpm', ['check:cost'], source);
     command('pnpm', ['--filter', '@line-crm/shared', '--filter', '@line-crm/line-sdk', '--filter', '@line-crm/db', '--filter', '@line-harness/update-engine', 'build'], source);
     command('pnpm', ['--filter', 'worker', 'typecheck'], source);
     command('pnpm', ['--filter', 'worker', 'test'], source);
