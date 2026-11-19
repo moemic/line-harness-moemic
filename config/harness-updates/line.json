@@ -1,6 +1,6 @@
 {
-  "releaseTag": "v0.26.1",
-  "sourceSha": "3fd0a9d249f38b64931aab9f2a213fab957af62a",
-  "workerVersion": "16360c3d-36ab-4983-85cb-9526312b8fd6",
-  "codeHash": "389bd53713581c2255ce14b0b4c105c3b3893bfebf6294046abca1169c364834"
+  "releaseTag": "v0.26.2",
+  "sourceSha": "d0b45f4bab9b1f7015ec14ed0fad74ff32fdaf03",
+  "workerVersion": "c397203d-2b9e-4084-b010-d23a00f384a4",
+  "codeHash": "bb5d5aa79d4fe700429fb4867454134b6ca7145526315413777372fe27eb5ddc"
 }
