@@ -31,3 +31,5 @@ apps/worker/dist/
 .claude/launch.json
 
 .harness-runtime/
+.pnpm-store/
+__pycache__/
